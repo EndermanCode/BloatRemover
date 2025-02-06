@@ -189,6 +189,6 @@ if ($cleantaskbar == "Y" -or "y") {
 if ($updates == "Y" -or "y") {
     Install-Updates
 }
-Read-Host("Drücke eine Taste um das Script zu beenden...")
+Read-Host("Drücke Enter um das Script zu beenden...")
 
 
