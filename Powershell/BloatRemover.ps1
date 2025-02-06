@@ -171,10 +171,10 @@ function Remove-HPBloat {
     }
     Write-Host "Removed HP bloat"
 }
-$hpbloat = Read-Host"Sollen sämmtliche HP Apps deinstalliert werden? [Y][N]"
-$apps = Read-Host"Sollen default Apps installiert werden? [Y][N]"
-$updates = Read-Host"Sollen sämmtliche Windows Updates installiert werden? [Y][N]"
-$cleantaskbar = Read-Host"Sollen sämmtliche Apps aus der Taskleiste und Startmenu entfernt werden? [Y][N]"
+$hpbloat = Read-Host("Sollen sämmtliche HP Apps deinstalliert werden? [Y][N]")
+$apps = Read-Host("Sollen default Apps installiert werden? [Y][N]")
+$updates = Read-Host("Sollen sämmtliche Windows Updates installiert werden? [Y][N]")
+$cleantaskbar = Read-Host("Sollen sämmtliche Apps aus der Taskleiste und Startmenu entfernt werden? [Y][N]")
 
 if ($hpbloat == "Y" -or "y") {
     Remove-HPBloat
