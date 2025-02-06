@@ -84,7 +84,7 @@ function Install-Updates {
         Import-Module PSWindowsUpdate
     }
     Get-WindowsUpdate
-    Install-WindowsUpdate
+    Install-WindowsUpdate -AcceptAll -IgnoreReboot
 }
 
 function Remove-HPBloat {
@@ -178,8 +178,24 @@ function Remove-HPBloat {
 
     Write-Host "Removed HP bloat"
 }
+$hpbloat = Read-Host"Sollen sämmtliche HP Apps deinstalliert werden? [Y][N]"
+$apps = Read-Host"Sollen default Apps installiert werden? [Y][N]"
+$updates = Read-Host"Sollen sämmtliche Windows Updates installiert werden? [Y][N]"
+$cleantaskbar = Read-Host"Sollen sämmtliche Apps aus der Taskleiste und Startmenu entfernt werden? [Y][N]"
 
-Remove-HPBloat
-Remove-ApplicationsTaskbar
-Remove-ApplicationsStartMenu
-Install-DefaultApps
+if ($hpbloat == "Y" -or "y") {
+    Remove-HPBloat
+}
+if ($apps == "Y" -or "y") {
+    Install-DefaultApps
+}
+if ($cleantaskbar == "Y" -or "y") {
+    Remove-ApplicationsTaskbar
+    Remove-ApplicationsStartMenu
+}
+if ($updates == "Y" -or "y") {
+    Install-Updates
+}
+Read-Host"Drücke eine Taste um das Script zu beenden..."
+
+
