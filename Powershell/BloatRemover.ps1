@@ -27,7 +27,6 @@ $HPBloat = @(
     "Clipchamp"
 )
 
-Install-Module PSWindowsUpdate
 $OsVersion = Get-ComputerInfo | select WindowsProductName
 $pathTaskbar = "$env:USERPROFILE\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\"
 $pathStartmenu = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\"
