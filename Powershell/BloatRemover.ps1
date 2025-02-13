@@ -66,7 +66,7 @@ function Install-DefaultApps {
     choco install adobereader -y -f
     choco install 7zip -y -f
     choco install firefox -y -f
-    choco install teamviewer -y --ignore-checksum -f
+    choco install teamviewer.host -y --ignore-checksum -f
     choco install notepadplusplus -y -f
     choco install hpsupportassistant -y -f
 }
@@ -102,11 +102,10 @@ function Remove-HPBloat {
         "AD2F1837.HPQuickDrop"
         "AD2F1837.HPSystemInformation"
         "AD2F1837.myHP"
-        "RealtekSemiconductorCorp.HPAudioControl",
-        "HP Sure Recover",
-        "HP Sure Run Module",
+        "RealtekSemiconductorCorp.HPAudioControl"
+        "HP Sure Recover"
+        "HP Sure Run Module"
         ""
-
     )
 
     $HPidentifier = "AD2F1837"
