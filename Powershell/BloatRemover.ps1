@@ -175,17 +175,17 @@ $apps = Read-Host("Sollen default Apps installiert werden? [Y][N]")
 $updates = Read-Host("Sollen sämmtliche Windows Updates installiert werden? [Y][N]")
 $cleantaskbar = Read-Host("Sollen sämmtliche Apps aus der Taskleiste und Startmenu entfernt werden? [Y][N]")
 
-if ($hpbloat == "Y" -or "y") {
+if ($hpbloat = "Y" -or "y") {
     Remove-HPBloat
 }
-if ($apps == "Y" -or "y") {
+if ($apps = "Y" -or "y") {
     Install-DefaultApps
 }
-if ($cleantaskbar == "Y" -or "y") {
+if ($cleantaskbar = "Y" -or "y") {
     Remove-ApplicationsTaskbar
     Remove-ApplicationsStartMenu
 }
-if ($updates == "Y" -or "y") {
+if ($updates = "Y" -or "y") {
     Install-Updates
 }
 Read-Host("Drücke Enter um das Script zu beenden...")
