@@ -69,6 +69,7 @@ function Install-DefaultApps {
     choco install teamviewer.host -y --ignore-checksum -f
     choco install notepadplusplus -y -f
     choco install hpsupportassistant -y -f
+    choco install office365business -y -f
 }
 
 function Install-Updates {
