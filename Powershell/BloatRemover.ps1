@@ -63,13 +63,13 @@ function Install-DefaultApps {
     Write-Host "installing Chocolatey..."
     Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
     choco install googlechrome -y --ignore-checksum -f
-    choco install adobereader -y -f
-    choco install 7zip -y -f
-    choco install firefox -y -f
+    choco install adobereader -y --ignore-checksum -f
+    choco install 7zip -y --ignore-checksum -f
+    choco install firefox -y --ignore-checksum -f
     choco install teamviewer.host -y --ignore-checksum -f
-    choco install notepadplusplus -y -f
-    choco install hpsupportassistant -y -f
-    choco install office365business -y -f
+    choco install notepadplusplus -y --ignore-checksum -f
+    choco install hpsupportassistant -y --ignore-checksum -f
+    choco install office365business -y --ignore-checksum -f
 }
 
 function Install-Updates {
