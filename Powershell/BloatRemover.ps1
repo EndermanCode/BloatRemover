@@ -32,6 +32,33 @@ $pathTaskbar = "$env:USERPROFILE\AppData\Roaming\Microsoft\Internet Explorer\Qui
 $pathStartmenu = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\"
 $ErrorActionPreference = 'SilentlyContinue'
 
+function Test-Yes {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+    return $Value.Trim() -match '^(?i:y|yes|ja)$'
+}
+
+function Install-ChocoPackage {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name,
+        [string]$Params,
+        [switch]$AllowLongInstall
+    )
+
+    $args = @("install", $Name, "-y", "--ignore-checksum", "-f")
+    if ($AllowLongInstall) { $args += "--execution-timeout=0" }
+    if ($Params) { $args += @("--params", $Params) }
+
+    Write-Host "Installing $Name..."
+    & choco @args
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Chocolatey install failed for $Name (exit code $LASTEXITCODE)."
+    }
+}
+
 function Remove-ApplicationsTaskbar {
 
     foreach ($name in $names) {
@@ -62,14 +89,18 @@ function Remove-ApplicationsStartMenu {
 function Install-DefaultApps {
     Write-Host "installing Chocolatey..."
     Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-    choco install googlechrome -y --ignore-checksum -f
-    choco install adobereader -y --ignore-checksum -f
-    choco install 7zip -y --ignore-checksum -f
-    choco install firefox -y --ignore-checksum -f
-    choco install teamviewer.host -y --ignore-checksum -f
-    choco install notepadplusplus -y --ignore-checksum -f
-    choco install hpsupportassistant -y --ignore-checksum -f
-    choco install office365business -y --ignore-checksum -f
+    if (Test-Path "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1") {
+        Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1" -Force
+        refreshenv
+    }
+    Install-ChocoPackage -Name "googlechrome"
+    Install-ChocoPackage -Name "adobereader"
+    Install-ChocoPackage -Name "7zip"
+    Install-ChocoPackage -Name "firefox"
+    Install-ChocoPackage -Name "teamviewer.host"
+    Install-ChocoPackage -Name "notepadplusplus"
+    Install-ChocoPackage -Name "hpsupportassistant"
+    Install-ChocoPackage -Name "office365business" -Params "/eula:TRUE" -AllowLongInstall
 }
 
 function Install-Updates {
@@ -171,23 +202,39 @@ function Remove-HPBloat {
     }
     Write-Host "Removed HP bloat"
 }
+
+function Set-PowerSettings {
+    Write-Host "Disabling Fast Startup..."
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name HiberbootEnabled -Type DWord -Value 0
+
+    Write-Host "Setting hibernate timeout on AC to never..."
+    powercfg /change -hibernate-timeout-ac 0
+
+    Write-Host "Setting monitor timeout on AC to 30 minutes..."
+    powercfg /change -monitor-timeout-ac 30
+}
+
 $hpbloat = Read-Host("Sollen sämmtliche HP Apps deinstalliert werden? [Y][N]")
 $apps = Read-Host("Sollen default Apps installiert werden? [Y][N]")
 $updates = Read-Host("Sollen sämmtliche Windows Updates installiert werden? [Y][N]")
 $cleantaskbar = Read-Host("Sollen sämmtliche Apps aus der Taskleiste und Startmenu entfernt werden? [Y][N]")
+$power = Read-Host("Sollen Schnellstart deaktiviert und Energieoptionen (Netzbetrieb) gesetzt werden? [Y][N]")
 
-if ($hpbloat = "Y" -or "y") {
+if (Test-Yes $hpbloat) {
     Remove-HPBloat
 }
-if ($apps = "Y" -or "y") {
+if (Test-Yes $apps) {
     Install-DefaultApps
 }
-if ($cleantaskbar = "Y" -or "y") {
+if (Test-Yes $cleantaskbar) {
     Remove-ApplicationsTaskbar
     Remove-ApplicationsStartMenu
 }
-if ($updates = "Y" -or "y") {
+if (Test-Yes $updates) {
     Install-Updates
+}
+if (Test-Yes $power) {
+    Set-PowerSettings
 }
 Read-Host("Drücke Enter um das Script zu beenden...")
 
