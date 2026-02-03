@@ -30,7 +30,7 @@ $HPBloat = @(
 $OsVersion = Get-ComputerInfo | select WindowsProductName
 $pathTaskbar = "$env:USERPROFILE\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\"
 $pathStartmenu = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\"
-$ErrorActionPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Continue'
 
 function Test-Yes {
     param([string]$Value)
@@ -142,11 +142,16 @@ function Remove-HPBloat {
 
     $HPidentifier = "AD2F1837"
 
-    $InstalledPackages = Get-AppxPackage -AllUsers | Where-Object {($UninstallPackages -contains $_.Name) -or ($_.Name -match "^$HPidentifier")}
+    $InstalledPackages = @(Get-AppxPackage -AllUsers | Where-Object {($UninstallPrograms -contains $_.Name) -or ($_.Name -match "^$HPidentifier")})
 
-    $ProvisionedPackages = Get-AppxProvisionedPackage -Online | Where-Object {($UninstallPackages -contains $_.DisplayName) -or ($_.DisplayName -match "^$HPidentifier")}
+    $ProvisionedPackages = @(Get-AppxProvisionedPackage -Online | Where-Object {($UninstallPrograms -contains $_.DisplayName) -or ($_.DisplayName -match "^$HPidentifier")})
 
-    $InstalledPrograms = Get-Package | Where-Object {$UninstallPrograms -contains $_.Name}
+    $InstalledPrograms = @(Get-Package | Where-Object {$UninstallPrograms -contains $_.Name})
+
+    Write-Host ("HP Apps (installed): {0}, provisioned: {1}, programs: {2}" -f $InstalledPackages.Count, $ProvisionedPackages.Count, $InstalledPrograms.Count)
+    if (($InstalledPackages.Count + $ProvisionedPackages.Count + $InstalledPrograms.Count) -eq 0) {
+        Write-Host "No HP apps found to remove."
+    }
 
     # Remove provisioned packages first
     ForEach ($ProvPackage in $ProvisionedPackages) {
