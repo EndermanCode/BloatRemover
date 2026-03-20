@@ -48,7 +48,7 @@ function Install-ChocoPackage {
         [switch]$AllowLongInstall
     )
 
-    $args = @("install", $Name, "-y", "--ignore-checksum", "-f", "--no-progress", "--limit-output", "--acceptlicense")
+    $args = @("install", $Name, "-y", "--ignore-checksum", "--no-progress", "--limit-output", "--acceptlicense")
     if ($AllowLongInstall) { $args += "--execution-timeout=0" }
     if ($Params) { $args += @("--params", $Params) }
 
