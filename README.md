@@ -1,6 +1,26 @@
 # BloatRemover
 
-Windows-Tool fuer die Erstinstallation und System-Setup mit GUI.
+Windows-Tool fuer die Erstinstallation und das System-Setup als GUI und PowerShell-CLI.
+
+## PowerShell-CLI
+Start als Administrator:
+```powershell
+.\Powershell\BloatRemover.ps1
+```
+
+Das nummerierte Menue bietet:
+- HP-Bloatware entfernen
+- Standard-Apps und Windows Updates installieren
+- Taskleiste und Startmenue bereinigen
+- .NET Framework 3.5 installieren
+- Energy Center mit drei Profilen und individuellen Einstellungen
+
+Im Energy Center lassen sich Netz- und Akkubetrieb getrennt konfigurieren:
+- Bildschirm-, Standby-, Ruhezustand- und Festplatten-Zeitlimits
+- Prozessor-Minimum und -Maximum
+- Selektives USB-Energiesparen
+- PCI-Express-Energiesparen ueber die Profile
+- Schnellstart und Ruhezustand jeweils aktivieren oder deaktivieren
 
 ## Zweck
 - Installiert vordefinierte Software (inkl. Chocolatey)
