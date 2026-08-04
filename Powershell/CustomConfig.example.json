@@ -1,8 +1,9 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "name": "Beispiel-SAP-Arbeitsplatz",
   "createdAt": "2026-08-04T00:00:00.0000000+02:00",
   "startupMode": "prompt",
+  "skipIfAlreadyApplied": true,
   "restartExplorer": false,
   "energy": {
     "preset": "Balanced",
@@ -61,6 +62,7 @@
       "type": "exe",
       "path": "Installers\\SAPSetup.exe",
       "arguments": "/Silent",
+      "detectName": "SAP GUI",
       "sha256": null,
       "successExitCodes": [
         0,

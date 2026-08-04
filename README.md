@@ -94,6 +94,15 @@ Task `hpDebloat` aufgenommen werden. Er laeuft an seiner Position in der
 Aktionsreihenfolge automatisch ab. HP Support Assistant, seine Support-Frameworks
 sowie Treiber, Firmware und BIOS-Komponenten bleiben wie beim Hauptmenue erhalten.
 
+Mit `skipIfAlreadyApplied: true` prueft das Skript vor jeder Config-Aktion den
+aktuellen Zielzustand. Bereits installierte Programme, entfernte Store- oder
+Desktop-Apps, identische Dateien, ein abgeschlossener HP-Debloat und bereits
+passende Energieeinstellungen werden mit `[SKIP]` protokolliert und nicht erneut
+ausgefuehrt. Wenn dadurch keine Aenderung notwendig war, wird auch ein im Profil
+aktivierter Explorer-Neustart ausgelassen. Bei lokalen EXE/MSI-Installern legt
+`detectName` den Erkennungsnamen aus `Programme und Features` fest. Bestehende
+Profile ohne `skipIfAlreadyApplied` behalten das bisherige Verhalten.
+
 Der Energieblock eines Profils unterstuetzt die Profile Energiesparend,
 Ausgeglichen und Leistung, eigene Zeitlimits fuer Netz- und Akkubetrieb sowie
 Schnellstart, Ruhezustand und selektives USB-Energiesparen. Nicht gesetzte Werte

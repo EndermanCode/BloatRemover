@@ -33,16 +33,16 @@ $HPBloat = @(
 )
 
 $DefaultWingetPackages = @(
-    [pscustomobject]@{ DisplayName = "Google Chrome"; Id = "Google.Chrome"; Name = $null; Source = "winget" }
-    [pscustomobject]@{ DisplayName = "Adobe Acrobat Reader (64-Bit)"; Id = "Adobe.Acrobat.Reader.64-bit"; Name = $null; Source = "winget" }
-    [pscustomobject]@{ DisplayName = "7-Zip"; Id = "7zip.7zip"; Name = $null; Source = "winget" }
-    [pscustomobject]@{ DisplayName = "Mozilla Firefox"; Id = "Mozilla.Firefox"; Name = $null; Source = "winget" }
-    [pscustomobject]@{ DisplayName = "TeamViewer Host"; Id = "TeamViewer.TeamViewer.Host"; Name = $null; Source = "winget" }
-    [pscustomobject]@{ DisplayName = "Notepad++"; Id = "Notepad++.Notepad++"; Name = $null; Source = "winget" }
+    [pscustomobject]@{ DisplayName = "Google Chrome"; Id = "Google.Chrome"; Name = $null; Source = "winget"; DetectName = "Google Chrome" }
+    [pscustomobject]@{ DisplayName = "Adobe Acrobat Reader (64-Bit)"; Id = "Adobe.Acrobat.Reader.64-bit"; Name = $null; Source = "winget"; DetectName = "Adobe Acrobat" }
+    [pscustomobject]@{ DisplayName = "7-Zip"; Id = "7zip.7zip"; Name = $null; Source = "winget"; DetectName = "7-Zip" }
+    [pscustomobject]@{ DisplayName = "Mozilla Firefox"; Id = "Mozilla.Firefox"; Name = $null; Source = "winget"; DetectName = "Mozilla Firefox" }
+    [pscustomobject]@{ DisplayName = "TeamViewer Host"; Id = "TeamViewer.TeamViewer.Host"; Name = $null; Source = "winget"; DetectName = "TeamViewer Host" }
+    [pscustomobject]@{ DisplayName = "Notepad++"; Id = "Notepad++.Notepad++"; Name = $null; Source = "winget"; DetectName = "Notepad++" }
     # HP Support Assistant hat derzeit kein Community-Manifest. WinGet greift
     # deshalb ueber den Namen auf die Microsoft-Store-Quelle zu.
-    [pscustomobject]@{ DisplayName = "HP Support Assistant"; Id = $null; Name = "HP Support Assistant"; Source = "msstore" }
-    [pscustomobject]@{ DisplayName = "Microsoft 365"; Id = "Microsoft.Office"; Name = $null; Source = "winget" }
+    [pscustomobject]@{ DisplayName = "HP Support Assistant"; Id = $null; Name = "HP Support Assistant"; Source = "msstore"; DetectName = "HP Support Assistant" }
+    [pscustomobject]@{ DisplayName = "Microsoft 365"; Id = "Microsoft.Office"; Name = $null; Source = "winget"; DetectName = "Microsoft 365" }
 )
 
 $OsVersion = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "ProductName" -ErrorAction SilentlyContinue).ProductName
@@ -939,6 +939,8 @@ function New-CustomInstallConfig {
 
     $configName = Read-RequiredValue -Prompt "Name der Konfiguration"
     $startupMode = Read-CustomConfigStartupMode
+    $skipAnswer = Read-Host "  Vor jeder Aktion pruefen und bereits erledigte Aktionen ueberspringen? [J/n]"
+    $skipIfAlreadyApplied = $skipAnswer -notmatch '^(?i:n|nein|no)$'
     $actions = [System.Collections.Generic.List[object]]::new()
 
     do {
@@ -978,6 +980,7 @@ function New-CustomInstallConfig {
                     Id = $package.Id
                     MatchName = $package.Name
                     Source = $package.Source
+                    DetectName = $package.DetectName
                     SourcePath = $null
                     Arguments = $null
                     CopyToConfig = $false
@@ -1075,12 +1078,16 @@ function New-CustomInstallConfig {
                 $uninstallId = $null
                 $uninstallName = Read-RequiredValue -Prompt "Exakter installierter Programmname"
             }
+            $defaultDetectName = if ($uninstallName) { $uninstallName } else { $displayName }
+            $uninstallDetectName = (Read-Host "  Erkennungsname unter 'Programme und Features' [$defaultDetectName]").Trim()
+            if ([string]::IsNullOrWhiteSpace($uninstallDetectName)) { $uninstallDetectName = $defaultDetectName }
             $actions.Add([pscustomobject]@{
                 Action = "uninstall"
                 Name = $displayName
                 Type = "winget"
                 Id = $uninstallId
                 MatchName = $uninstallName
+                DetectName = $uninstallDetectName
                 Source = $null
                 SourcePath = $null
                 Arguments = $null
@@ -1103,6 +1110,9 @@ function New-CustomInstallConfig {
                 $arguments = Read-RequiredValue -Prompt "Silent-Installationsparameter"
             }
 
+            $detectName = (Read-Host "  Name unter 'Programme und Features' fuer die Installationspruefung [$displayName]").Trim()
+            if ([string]::IsNullOrWhiteSpace($detectName)) { $detectName = $displayName }
+
             $copyAnswer = Read-Host "  Installer mit in den Config-Ordner kopieren? [J/n]"
             $copyToConfig = $copyAnswer -notmatch '^(?i:n|nein|no)$'
             $actions.Add([pscustomobject]@{
@@ -1114,6 +1124,7 @@ function New-CustomInstallConfig {
                 Source = $null
                 SourcePath = (Resolve-Path -LiteralPath $installerPath).Path
                 Arguments = $arguments
+                DetectName = $detectName
                 CopyToConfig = $copyToConfig
             })
         }
@@ -1192,6 +1203,7 @@ function New-CustomInstallConfig {
                     type = 'winget'
                     id = $action.Id
                     matchName = $action.MatchName
+                    detectName = $action.DetectName
                 })
             }
             continue
@@ -1205,6 +1217,7 @@ function New-CustomInstallConfig {
                 id = $action.Id
                 matchName = $action.MatchName
                 source = $action.Source
+                detectName = $action.DetectName
             })
             continue
         }
@@ -1226,16 +1239,18 @@ function New-CustomInstallConfig {
             type = $action.Type
             path = $savedPath
             arguments = $action.Arguments
+            detectName = $action.DetectName
             sha256 = $hash
             successExitCodes = @(0, 1641, 3010)
         })
     }
 
     $config = [ordered]@{
-        schemaVersion = 3
+        schemaVersion = 4
         name = $configName
         createdAt = (Get-Date).ToString('o')
         startupMode = $startupMode
+        skipIfAlreadyApplied = $skipIfAlreadyApplied
         restartExplorer = $restartExplorer
         energy = $energy
         actions = $serializedActions
@@ -1416,6 +1431,7 @@ function Show-CustomConfigEditorState {
     Write-Status -Type Info -Message "Profilname: $($Config.name)"
     $startupMode = Get-NormalizedStartupMode -Value ([string]$Config.startupMode)
     Write-Status -Type Info -Message "Startverhalten: $(if ($startupMode -eq 'automatic') { 'Sofort automatisch' } else { 'Beim Fund nachfragen' })"
+    Write-Status -Type Info -Message "Erledigte Aktionen ueberspringen: $(if ($Config.skipIfAlreadyApplied -eq $true) { 'Ja' } else { 'Nein' })"
     Write-Status -Type Info -Message "Explorer-Neustart: $(if ($Config.restartExplorer -eq $true) { 'Ja' } else { 'Nein' })"
     Write-Status -Type Info -Message "Energie: $(Get-CustomConfigEnergySummary -Energy $Config.energy)"
     Write-Host ""
@@ -1624,8 +1640,9 @@ function Save-CustomConfigObject {
         [Parameter(Mandatory)][string]$Path
     )
 
-    $Config | Add-Member -NotePropertyName schemaVersion -NotePropertyValue 3 -Force
+    $Config | Add-Member -NotePropertyName schemaVersion -NotePropertyValue 4 -Force
     $Config | Add-Member -NotePropertyName startupMode -NotePropertyValue (Get-NormalizedStartupMode -Value ([string]$Config.startupMode)) -Force
+    $Config | Add-Member -NotePropertyName skipIfAlreadyApplied -NotePropertyValue ($Config.skipIfAlreadyApplied -eq $true) -Force
     $Config | Add-Member -NotePropertyName modifiedAt -NotePropertyValue ((Get-Date).ToString('o')) -Force
     $Config | Add-Member -NotePropertyName actions -NotePropertyValue @($Actions) -Force
     if ($Config.PSObject.Properties.Name -contains 'applications') {
@@ -1675,6 +1692,7 @@ function Edit-CustomConfig {
         Write-MenuItem -Key "12" -Label "Aktionsreihenfolge aendern"
         Write-MenuItem -Key "13" -Label "Startverhalten aendern" -Hint "automatisch oder nachfragen"
         Write-MenuItem -Key "14" -Label "HP-Debloat hinzufuegen" -Hint "HP Support Assistant bleibt erhalten"
+        Write-MenuItem -Key "15" -Label "Erledigte Aktionen ueberspringen umschalten" -Hint "Installationen, Einstellungen und Deinstallationen pruefen"
         Write-MenuItem -Key "S" -Label "Speichern und Editor schliessen"
         Write-MenuItem -Key "0" -Label "Ohne Speichern schliessen"
         $choice = (Read-Host "  Auswahl").Trim().ToLowerInvariant()
@@ -1703,7 +1721,7 @@ function Edit-CustomConfig {
                     if (-not $duplicate) {
                         $actions.Add([pscustomobject][ordered]@{
                             action = 'install'; name = $package.DisplayName; type = 'winget'
-                            id = $package.Id; matchName = $package.Name; source = $package.Source
+                            id = $package.Id; matchName = $package.Name; source = $package.Source; detectName = $package.DetectName
                         })
                     }
                 }
@@ -1715,8 +1733,11 @@ function Edit-CustomConfig {
                 $matchChoice = Read-MenuChoice -Prompt "Suchmethode" -AllowedValues @("1", "2")
                 $id = if ($matchChoice -eq "1") { Read-RequiredValue -Prompt "WinGet-ID" } else { $null }
                 $matchName = if ($matchChoice -eq "2") { Read-RequiredValue -Prompt "Installierter Programmname" } else { $null }
+                $defaultDetectName = if ($matchName) { $matchName } else { $displayName }
+                $detectName = (Read-Host "  Erkennungsname unter 'Programme und Features' [$defaultDetectName]").Trim()
+                if (-not $detectName) { $detectName = $defaultDetectName }
                 $actions.Add([pscustomobject][ordered]@{
-                    action = 'uninstall'; name = $displayName; type = 'winget'; id = $id; matchName = $matchName
+                    action = 'uninstall'; name = $displayName; type = 'winget'; id = $id; matchName = $matchName; detectName = $detectName
                 })
             }
             "6" {
@@ -1770,6 +1791,8 @@ function Edit-CustomConfig {
                 $arguments = (Read-Host "  Installationsparameter [$defaultArguments]").Trim()
                 if (-not $arguments) { $arguments = $defaultArguments }
                 if ($type -eq 'exe' -and -not $arguments) { $arguments = Read-RequiredValue -Prompt "Silent-Installationsparameter" }
+                $detectName = (Read-Host "  Name unter 'Programme und Features' fuer die Installationspruefung [$name]").Trim()
+                if (-not $detectName) { $detectName = $name }
 
                 $copyAnswer = Read-Host "  Installer in den portablen Config-Ordner kopieren? [J/n]"
                 $savedPath = (Resolve-Path -LiteralPath $sourcePath).Path
@@ -1784,7 +1807,7 @@ function Edit-CustomConfig {
                 }
                 $actions.Add([pscustomobject][ordered]@{
                     action = 'install'; name = $name; type = $type; path = $savedPath
-                    arguments = $arguments; sha256 = $hash; successExitCodes = @(0, 1641, 3010)
+                    arguments = $arguments; detectName = $detectName; sha256 = $hash; successExitCodes = @(0, 1641, 3010)
                 })
             }
             "10" {
@@ -1805,6 +1828,11 @@ function Edit-CustomConfig {
                         else {
                             $newMatchName = (Read-Host "  Installierter Programmname [$($action.matchName)]").Trim()
                             if ($newMatchName) { $action | Add-Member -NotePropertyName matchName -NotePropertyValue $newMatchName -Force }
+                        }
+                        if (([string]$action.type).ToLowerInvariant() -eq 'winget') {
+                            $currentDetectName = if ($action.detectName) { $action.detectName } elseif ($action.matchName) { $action.matchName } else { $action.name }
+                            $newDetectName = (Read-Host "  Erkennungsname [$currentDetectName]").Trim()
+                            if ($newDetectName) { $action | Add-Member -NotePropertyName detectName -NotePropertyValue $newDetectName -Force }
                         }
                     }
                     elseif ($actionMode -eq 'replacefile') {
@@ -1835,6 +1863,9 @@ function Edit-CustomConfig {
                         }
                         $newArguments = (Read-Host "  Parameter [$($action.arguments)]").Trim()
                         if ($newArguments) { $action | Add-Member -NotePropertyName arguments -NotePropertyValue $newArguments -Force }
+                        $currentDetectName = if ($action.detectName) { $action.detectName } else { $action.name }
+                        $newDetectName = (Read-Host "  Installations-Erkennungsname [$currentDetectName]").Trim()
+                        if ($newDetectName) { $action | Add-Member -NotePropertyName detectName -NotePropertyValue $newDetectName -Force }
                     }
                 }
             }
@@ -1859,6 +1890,9 @@ function Edit-CustomConfig {
                     })
                     Write-Status -Type Success -Message "HP-Debloat wurde zur Config hinzugefuegt."
                 }
+            }
+            "15" {
+                $config | Add-Member -NotePropertyName skipIfAlreadyApplied -NotePropertyValue (-not ($config.skipIfAlreadyApplied -eq $true)) -Force
             }
             "s" {
                 if ($actions.Count -eq 0 -and $null -eq $config.energy) {
@@ -1923,6 +1957,274 @@ function Invoke-CustomFileInstaller {
     }
 }
 
+function ConvertTo-ApplicationDetectionKey {
+    param([AllowNull()][string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
+    return ($Value.ToLowerInvariant() -replace '[^a-z0-9]', '')
+}
+
+function Get-DetectedAppxPackages {
+    try {
+        return @(Get-AppxPackage -AllUsers -ErrorAction Stop)
+    }
+    catch {
+        return @(Get-AppxPackage -ErrorAction SilentlyContinue)
+    }
+}
+
+function Test-InstalledApplicationByName {
+    param([AllowNull()][string]$MatchName)
+
+    if ([string]::IsNullOrWhiteSpace($MatchName)) { return $false }
+    $escapedName = [regex]::Escape($MatchName.Trim())
+    foreach ($root in @(Get-DesktopUninstallRegistryRoots)) {
+        $match = Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
+            Where-Object {
+                $displayName = [string]$_.DisplayName
+                $displayName -match "(?i)^$escapedName(?:\s|\(|$)"
+            } |
+            Select-Object -First 1
+        if ($null -ne $match) { return $true }
+    }
+
+    $detectionKey = ConvertTo-ApplicationDetectionKey -Value $MatchName
+    if ($detectionKey.Length -ge 5) {
+        $appxMatch = Get-DetectedAppxPackages |
+            Where-Object {
+                (ConvertTo-ApplicationDetectionKey -Value "$($_.Name) $($_.PackageFamilyName)") -like "*$detectionKey*"
+            } |
+            Select-Object -First 1
+        if ($null -ne $appxMatch) { return $true }
+    }
+    return $false
+}
+
+function Test-StoreAppPresent {
+    param(
+        [string]$PackageName,
+        [string]$PackageFamilyName
+    )
+
+    $installed = Get-DetectedAppxPackages |
+        Where-Object {
+            ($PackageName -and $_.Name -eq $PackageName) -or
+            ($PackageFamilyName -and $_.PackageFamilyName -eq $PackageFamilyName)
+        } |
+        Select-Object -First 1
+    if ($null -ne $installed) { return $true }
+
+    $provisioned = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+        Where-Object {
+            ($PackageName -and $_.DisplayName -eq $PackageName) -or
+            ($PackageFamilyName -and $_.PackageName -like "$PackageFamilyName*")
+        } |
+        Select-Object -First 1
+    return $null -ne $provisioned
+}
+
+function Test-CustomFileReplacementCurrent {
+    param(
+        [Parameter(Mandatory)]$Action,
+        [Parameter(Mandatory)][string]$ConfigDirectory
+    )
+
+    try {
+        $sourcePath = Resolve-CustomConfigSourcePath -Path ([string]$Action.source) -ConfigDirectory $ConfigDirectory
+        $targetPath = Resolve-CustomConfigTargetPath -Path ([string]$Action.target)
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf) -or -not (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
+            return $false
+        }
+        return (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256 -ErrorAction Stop).Hash -eq
+            (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256 -ErrorAction Stop).Hash
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-CurrentPowerSettingValues {
+    param(
+        [Parameter(Mandatory)][string]$SubGroup,
+        [Parameter(Mandatory)][string]$Setting
+    )
+
+    $output = @(& powercfg.exe /query SCHEME_CURRENT $SubGroup $Setting 2>$null)
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $hexValues = [regex]::Matches(($output -join "`n"), '0x([0-9a-fA-F]+)')
+    if ($hexValues.Count -lt 2) { return $null }
+    [pscustomobject]@{
+        Ac = [Convert]::ToInt64($hexValues[$hexValues.Count - 2].Groups[1].Value, 16)
+        Dc = [Convert]::ToInt64($hexValues[$hexValues.Count - 1].Groups[1].Value, 16)
+    }
+}
+
+function Get-ExpectedCustomConfigPowerSettings {
+    param([Parameter(Mandatory)]$Energy)
+
+    $expected = @{}
+    $timeoutDefinitions = @(
+        @{ Property = 'monitor'; SubGroup = 'SUB_VIDEO'; Setting = 'VIDEOIDLE' }
+        @{ Property = 'standby'; SubGroup = 'SUB_SLEEP'; Setting = 'STANDBYIDLE' }
+        @{ Property = 'hibernate'; SubGroup = 'SUB_SLEEP'; Setting = 'HIBERNATEIDLE' }
+        @{ Property = 'disk'; SubGroup = 'SUB_DISK'; Setting = 'DISKIDLE' }
+    )
+
+    $presetTimeouts = $null
+    $presetAdvanced = @()
+    switch ([string]$Energy.preset) {
+        'Eco' {
+            $presetTimeouts = @{ monitorAc = 10; monitorDc = 5; standbyAc = 20; standbyDc = 10; hibernateAc = 60; hibernateDc = 30; diskAc = 10; diskDc = 5 }
+            $presetAdvanced = @(
+                @{ SubGroup = 'SUB_PROCESSOR'; Setting = 'PROCTHROTTLEMIN'; Ac = 5; Dc = 5 }
+                @{ SubGroup = 'SUB_PROCESSOR'; Setting = 'PROCTHROTTLEMAX'; Ac = 80; Dc = 60 }
+                @{ SubGroup = '2a737441-1930-4402-8d77-b2bebba308a3'; Setting = '48e6b7a6-50f5-4782-a5d4-53bb8f07e226'; Ac = 1; Dc = 1 }
+                @{ SubGroup = 'SUB_PCIEXPRESS'; Setting = 'ASPM'; Ac = 2; Dc = 2 }
+            )
+        }
+        'Balanced' {
+            $presetTimeouts = @{ monitorAc = 15; monitorDc = 5; standbyAc = 30; standbyDc = 15; hibernateAc = 120; hibernateDc = 60; diskAc = 20; diskDc = 10 }
+            $presetAdvanced = @(
+                @{ SubGroup = 'SUB_PROCESSOR'; Setting = 'PROCTHROTTLEMIN'; Ac = 5; Dc = 5 }
+                @{ SubGroup = 'SUB_PROCESSOR'; Setting = 'PROCTHROTTLEMAX'; Ac = 100; Dc = 80 }
+                @{ SubGroup = '2a737441-1930-4402-8d77-b2bebba308a3'; Setting = '48e6b7a6-50f5-4782-a5d4-53bb8f07e226'; Ac = 1; Dc = 1 }
+                @{ SubGroup = 'SUB_PCIEXPRESS'; Setting = 'ASPM'; Ac = 1; Dc = 2 }
+            )
+        }
+        'Performance' {
+            $presetTimeouts = @{ monitorAc = 30; monitorDc = 10; standbyAc = 0; standbyDc = 30; hibernateAc = 0; hibernateDc = 120; diskAc = 0; diskDc = 20 }
+            $presetAdvanced = @(
+                @{ SubGroup = 'SUB_PROCESSOR'; Setting = 'PROCTHROTTLEMIN'; Ac = 5; Dc = 5 }
+                @{ SubGroup = 'SUB_PROCESSOR'; Setting = 'PROCTHROTTLEMAX'; Ac = 100; Dc = 100 }
+                @{ SubGroup = '2a737441-1930-4402-8d77-b2bebba308a3'; Setting = '48e6b7a6-50f5-4782-a5d4-53bb8f07e226'; Ac = 0; Dc = 1 }
+                @{ SubGroup = 'SUB_PCIEXPRESS'; Setting = 'ASPM'; Ac = 0; Dc = 1 }
+            )
+        }
+    }
+
+    $timeouts = if ($null -ne $presetTimeouts) { $presetTimeouts } else { $Energy.timeouts }
+    if ($null -ne $timeouts) {
+        foreach ($definition in $timeoutDefinitions) {
+            $acProperty = $definition.Property + 'Ac'
+            $dcProperty = $definition.Property + 'Dc'
+            $expected["$($definition.SubGroup)|$($definition.Setting)"] = [pscustomobject]@{
+                SubGroup = $definition.SubGroup
+                Setting = $definition.Setting
+                Ac = [long]$timeouts.$acProperty * 60
+                Dc = [long]$timeouts.$dcProperty * 60
+            }
+        }
+    }
+    foreach ($setting in $presetAdvanced) {
+        $expected["$($setting.SubGroup)|$($setting.Setting)"] = [pscustomobject]$setting
+    }
+
+    $usbState = [string]$Energy.usbPowerSaving
+    if ($usbState -in @('enabled', 'disabled')) {
+        $usbValue = if ($usbState -eq 'enabled') { 1 } else { 0 }
+        $expected['2a737441-1930-4402-8d77-b2bebba308a3|48e6b7a6-50f5-4782-a5d4-53bb8f07e226'] = [pscustomobject]@{
+            SubGroup = '2a737441-1930-4402-8d77-b2bebba308a3'
+            Setting = '48e6b7a6-50f5-4782-a5d4-53bb8f07e226'
+            Ac = $usbValue
+            Dc = $usbValue
+        }
+    }
+    @($expected.Values)
+}
+
+function Test-CustomConfigEnergyAlreadyApplied {
+    param([Parameter(Mandatory)]$Energy)
+
+    foreach ($expected in @(Get-ExpectedCustomConfigPowerSettings -Energy $Energy)) {
+        $current = Get-CurrentPowerSettingValues -SubGroup $expected.SubGroup -Setting $expected.Setting
+        if ($null -eq $current -or [long]$current.Ac -ne [long]$expected.Ac -or [long]$current.Dc -ne [long]$expected.Dc) {
+            return $false
+        }
+    }
+
+    $fastStartup = [string]$Energy.fastStartup
+    if ($fastStartup -in @('enabled', 'disabled')) {
+        $actualFastStartup = 0
+        try {
+            $actualFastStartup = [int](Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name 'HiberbootEnabled' -ErrorAction Stop)
+        }
+        catch {}
+        $expectedFastStartup = if ($fastStartup -eq 'enabled') { 1 } else { 0 }
+        if ($actualFastStartup -ne $expectedFastStartup) { return $false }
+    }
+
+    $hibernation = [string]$Energy.hibernation
+    $expectedHibernation = $null
+    if ($hibernation -eq 'enabled') { $expectedHibernation = $true }
+    elseif ($hibernation -eq 'disabled') { $expectedHibernation = $false }
+    if ($fastStartup -eq 'enabled') { $expectedHibernation = $true }
+    if ($null -ne $expectedHibernation) {
+        $hibernationEnabled = Test-Path -LiteralPath "$env:SystemDrive\hiberfil.sys" -PathType Leaf
+        if ($hibernationEnabled -ne $expectedHibernation) { return $false }
+    }
+    return $true
+}
+
+function Test-HPDebloatRequired {
+    if (@(Get-HPProvisionedPackages).Count -gt 0) { return $true }
+    if (@(Get-HPAppxPackages).Count -gt 0) { return $true }
+    if (@(Get-HPInstalledPrograms).Count -gt 0) { return $true }
+    if (Test-Path -LiteralPath 'C:\Program Files\HP\Documentation\Doc_uninstall.cmd' -PathType Leaf) { return $true }
+
+    $service = Get-CimInstance Win32_Service -ErrorAction SilentlyContinue |
+        Where-Object { Test-HPComponent -Name $_.DisplayName -Publisher '' -Identity "$($_.Name) $($_.PathName)" } |
+        Select-Object -First 1
+    if ($null -ne $service) { return $true }
+    $task = Get-ScheduledTask -ErrorAction SilentlyContinue |
+        Where-Object { Test-HPComponent -Name $_.TaskName -Publisher '' -Identity $_.TaskPath } |
+        Select-Object -First 1
+    if ($null -ne $task) { return $true }
+
+    foreach ($shortcutRoot in @($pathTaskbar, $pathStartmenu, "$env:ProgramData\Microsoft\Windows\Start Menu\Programs", "$env:APPDATA\Microsoft\Windows\Start Menu\Programs") | Sort-Object -Unique) {
+        if ([string]::IsNullOrWhiteSpace($shortcutRoot) -or -not (Test-Path -LiteralPath $shortcutRoot -PathType Container)) { continue }
+        $shortcut = Get-ChildItem -LiteralPath $shortcutRoot -Filter '*.lnk' -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { Test-HPComponent -Name $_.BaseName -Publisher '' -Identity $_.FullName } |
+            Select-Object -First 1
+        if ($null -ne $shortcut) { return $true }
+    }
+
+    foreach ($root in @("$env:ProgramFiles\HP", "${env:ProgramFiles(x86)}\HP")) {
+        if ([string]::IsNullOrWhiteSpace($root) -or -not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        $orphan = Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue |
+            Where-Object { -not (Test-HPProtectedComponent -Name $_.Name) -and -not (Test-HPDriverOrFirmware -Name $_.Name -Path $_.FullName) } |
+            Select-Object -First 1
+        if ($null -ne $orphan) { return $true }
+    }
+    return $false
+}
+
+function Test-CustomActionAlreadyApplied {
+    param(
+        [Parameter(Mandatory)]$Action,
+        [Parameter(Mandatory)][string]$ConfigDirectory
+    )
+
+    $actionMode = ([string]$Action.action).ToLowerInvariant()
+    $type = ([string]$Action.type).ToLowerInvariant()
+    if ($actionMode -eq 'replacefile') {
+        return Test-CustomFileReplacementCurrent -Action $Action -ConfigDirectory $ConfigDirectory
+    }
+    if ($actionMode -eq 'runtask' -and ([string]$Action.task).ToLowerInvariant() -eq 'hpdebloat') {
+        return -not (Test-HPDebloatRequired)
+    }
+
+    $detectName = if ($Action.detectName) { [string]$Action.detectName } elseif ($Action.matchName) { [string]$Action.matchName } else { [string]$Action.name }
+    if ($actionMode -eq 'install') {
+        return Test-InstalledApplicationByName -MatchName $detectName
+    }
+    if ($actionMode -eq 'uninstall') {
+        if ($type -eq 'appx') {
+            return -not (Test-StoreAppPresent -PackageName ([string]$Action.packageName) -PackageFamilyName ([string]$Action.packageFamilyName))
+        }
+        return -not (Test-InstalledApplicationByName -MatchName $detectName)
+    }
+    return $false
+}
+
 function Install-CustomConfig {
     param([string]$Path)
 
@@ -1963,14 +2265,34 @@ function Install-CustomConfig {
     Write-Host ""
     Write-Status -Type Info -Message "Profil: $($config.name)"
     Write-Status -Type Info -Message "$($actions.Count) Config-Aktion(en) werden jetzt ohne weitere Rueckfragen ausgefuehrt."
+    $skipIfAlreadyApplied = $config.skipIfAlreadyApplied -eq $true
+    Write-Status -Type Info -Message "Zielzustand-Pruefung: $(if ($skipIfAlreadyApplied) { 'Aktiv' } else { 'Inaktiv' })"
 
     $configDirectory = Split-Path -Parent $configPath
     $failedActions = 0
+    $skippedActions = 0
+    $changesPerformed = $false
     foreach ($action in $actions) {
         Write-Host ""
         $actionMode = ([string]$action.action).ToLowerInvariant()
         if ([string]::IsNullOrWhiteSpace($actionMode)) { $actionMode = 'install' }
         $verb = if ($actionMode -eq 'uninstall') { 'Deinstalliere' } elseif ($actionMode -eq 'replacefile') { 'Ersetze Datei' } elseif ($actionMode -eq 'runtask') { 'Fuehre Systemaktion aus' } else { 'Installiere' }
+
+        if ($skipIfAlreadyApplied) {
+            $alreadyApplied = $false
+            try {
+                $alreadyApplied = Test-CustomActionAlreadyApplied -Action $action -ConfigDirectory $configDirectory
+            }
+            catch {
+                Write-Status -Type Warning -Message "Zielzustand von '$($action.name)' konnte nicht sicher geprueft werden; die Aktion wird ausgefuehrt."
+            }
+            if ($alreadyApplied) {
+                $skippedActions++
+                Write-Status -Type Skip -Message "'$($action.name)' ist bereits im gewuenschten Zustand."
+                continue
+            }
+        }
+
         Write-Status -Type Info -Message "$verb`: $($action.name)"
         try {
             if ($actionMode -notin @('install', 'uninstall', 'replacefile', 'runtask')) {
@@ -2016,6 +2338,7 @@ function Install-CustomConfig {
                 }
             }
             Write-Status -Type Success -Message "'$($action.name)' wurde verarbeitet."
+            $changesPerformed = $true
         }
         catch {
             $failedActions++
@@ -2025,24 +2348,44 @@ function Install-CustomConfig {
 
     if ($null -ne $config.energy) {
         Write-Host ""
-        Write-Status -Type Info -Message "Energieeinstellungen werden angewendet: $(Get-CustomConfigEnergySummary -Energy $config.energy)"
-        try {
-            Invoke-CustomConfigEnergy -Energy $config.energy
-            Write-Status -Type Success -Message "Energieeinstellungen wurden verarbeitet."
+        $energyAlreadyApplied = $false
+        if ($skipIfAlreadyApplied) {
+            try { $energyAlreadyApplied = Test-CustomConfigEnergyAlreadyApplied -Energy $config.energy }
+            catch { Write-Status -Type Warning -Message "Energieeinstellungen konnten nicht sicher geprueft werden; sie werden erneut angewendet." }
         }
-        catch {
-            $failedActions++
-            Write-Status -Type Error -Message "Energieeinstellungen sind fehlgeschlagen: $($_.Exception.Message)"
+        if ($energyAlreadyApplied) {
+            $skippedActions++
+            Write-Status -Type Skip -Message "Energieeinstellungen entsprechen bereits der Config."
+        }
+        else {
+            Write-Status -Type Info -Message "Energieeinstellungen werden angewendet: $(Get-CustomConfigEnergySummary -Energy $config.energy)"
+            try {
+                Invoke-CustomConfigEnergy -Energy $config.energy
+                Write-Status -Type Success -Message "Energieeinstellungen wurden verarbeitet."
+                $changesPerformed = $true
+            }
+            catch {
+                $failedActions++
+                Write-Status -Type Error -Message "Energieeinstellungen sind fehlgeschlagen: $($_.Exception.Message)"
+            }
         }
     }
 
     if ($config.restartExplorer -eq $true) {
-        Restart-WindowsExplorer
+        if ($skipIfAlreadyApplied -and -not $changesPerformed) {
+            Write-Status -Type Skip -Message "Explorer-Neustart ist nicht erforderlich, weil keine Aenderung ausgefuehrt wurde."
+        }
+        else {
+            Restart-WindowsExplorer
+        }
     }
 
     if ($failedActions -gt 0) {
         Write-Status -Type Warning -Message "$failedActions Aktion(en) sind fehlgeschlagen; alle uebrigen Aktionen wurden trotzdem ausgefuehrt."
         return $false
+    }
+    if ($skippedActions -gt 0) {
+        Write-Status -Type Info -Message "$skippedActions bereits erledigte Aktion(en) wurden uebersprungen."
     }
     Write-Status -Type Success -Message "Custom-Konfiguration wurde vollstaendig ausgefuehrt."
     $script:LastCustomConfigSucceeded = $true
@@ -2358,12 +2701,13 @@ function Write-Section {
 
 function Write-Status {
     param(
-        [Parameter(Mandatory)][ValidateSet("Info", "Success", "Warning", "Error")][string]$Type,
+        [Parameter(Mandatory)][ValidateSet("Info", "Success", "Skip", "Warning", "Error")][string]$Type,
         [Parameter(Mandatory)][string]$Message
     )
 
     $style = switch ($Type) {
         "Success" { @{ Label = " OK "; Color = "Green" } }
+        "Skip"    { @{ Label = "SKIP"; Color = "DarkCyan" } }
         "Warning" { @{ Label = "WARN"; Color = "Yellow" } }
         "Error"   { @{ Label = "FAIL"; Color = "Red" } }
         default   { @{ Label = "INFO"; Color = "Cyan" } }
