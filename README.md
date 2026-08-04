@@ -13,12 +13,15 @@ Das nummerierte Menue bietet:
 - Standard-Apps und Windows Updates installieren
 - Taskleiste und Startmenue bereinigen
 - .NET Framework 3.5 installieren
+- Chocolatey-Paketliste anzeigen
 - Energy Center mit drei Profilen und individuellen Einstellungen
 
 Im Hauptmenue koennen mehrere Aktionen auf einmal ausgewaehlt werden, zum Beispiel
 `1,2,4,6`. Die Aktionen laufen danach in der angezeigten Menue-Reihenfolge. Mit
-`alle` oder `a` werden alle automatischen Aktionen gestartet; das interaktive
-Energy Center bleibt davon ausgenommen.
+`alle` oder `a` werden die Menuepunkte 1 bis 7 der Reihe nach gestartet. Das
+Energy Center wird dabei als interaktives Untermenue geoeffnet; nach der Rueckkehr
+laufen die nachfolgenden Aktionen weiter. Eine zusaetzliche Sammelbestaetigung
+ist nicht erforderlich.
 
 Beim HP-Debloat werden Store-Apps, provisionierte Pakete und klassische
 Desktop-Programme in mehreren Durchlaeufen entfernt. Danach werden verwaiste

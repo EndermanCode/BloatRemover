@@ -27,6 +27,17 @@ $HPBloat = @(
     "Clipchamp"
 )
 
+$DefaultChocoPackages = @(
+    [pscustomobject]@{ DisplayName = "Google Chrome"; Id = "googlechrome"; Params = $null; AllowLongInstall = $false }
+    [pscustomobject]@{ DisplayName = "Adobe Reader"; Id = "adobereader"; Params = $null; AllowLongInstall = $false }
+    [pscustomobject]@{ DisplayName = "7-Zip"; Id = "7zip"; Params = $null; AllowLongInstall = $false }
+    [pscustomobject]@{ DisplayName = "Mozilla Firefox"; Id = "firefox"; Params = $null; AllowLongInstall = $false }
+    [pscustomobject]@{ DisplayName = "TeamViewer Host"; Id = "teamviewer.host"; Params = $null; AllowLongInstall = $false }
+    [pscustomobject]@{ DisplayName = "Notepad++"; Id = "notepadplusplus"; Params = $null; AllowLongInstall = $false }
+    [pscustomobject]@{ DisplayName = "HP Support Assistant"; Id = "hpsupportassistant"; Params = $null; AllowLongInstall = $false }
+    [pscustomobject]@{ DisplayName = "Microsoft 365 Business"; Id = "office365business"; Params = "/eula:TRUE"; AllowLongInstall = $true }
+)
+
 $OsVersion = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "ProductName" -ErrorAction SilentlyContinue).ProductName
 $pathTaskbar = "$env:USERPROFILE\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\"
 $pathStartmenu = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\"
@@ -93,14 +104,22 @@ function Install-DefaultApps {
         Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1" -Force
         refreshenv
     }
-    Install-ChocoPackage -Name "googlechrome"
-    Install-ChocoPackage -Name "adobereader"
-    Install-ChocoPackage -Name "7zip"
-    Install-ChocoPackage -Name "firefox"
-    Install-ChocoPackage -Name "teamviewer.host"
-    Install-ChocoPackage -Name "notepadplusplus"
-    Install-ChocoPackage -Name "hpsupportassistant"
-    Install-ChocoPackage -Name "office365business" -Params "/eula:TRUE" -AllowLongInstall
+    foreach ($package in $DefaultChocoPackages) {
+        $installArguments = @{ Name = $package.Id }
+        if ($package.Params) { $installArguments.Params = $package.Params }
+        if ($package.AllowLongInstall) { $installArguments.AllowLongInstall = $true }
+        Install-ChocoPackage @installArguments
+    }
+}
+
+function Show-ChocoPackageList {
+    Write-Status -Type Info -Message "Diese Chocolatey-Pakete werden bei 'Standard-Apps installieren' der Reihe nach installiert:"
+    Write-Host ""
+
+    for ($index = 0; $index -lt $DefaultChocoPackages.Count; $index++) {
+        $package = $DefaultChocoPackages[$index]
+        Write-Host ("  {0,2}. {1}  [{2}]" -f ($index + 1), $package.DisplayName, $package.Id) -ForegroundColor White
+    }
 }
 
 function Install-Updates {
@@ -512,13 +531,6 @@ function Read-Integer {
     } while ($true)
 }
 
-function Confirm-Action {
-    param([Parameter(Mandatory)][string]$Message)
-
-    $answer = Read-Host "  $Message [j/N]"
-    return (Test-Yes $answer)
-}
-
 function Wait-ForUser {
     Write-Host ""
     $null = Read-Host "  Enter druecken, um fortzufahren"
@@ -824,12 +836,13 @@ function Show-MainMenu {
         Write-MenuItem -Key "4" -Label "Taskleiste und Startmenue bereinigen"
         Write-MenuItem -Key "5" -Label "Energy Center" -Hint "Profile und erweiterte Energieoptionen"
         Write-MenuItem -Key "6" -Label ".NET Framework 3.5 installieren"
-        Write-MenuItem -Key "A" -Label "Alle automatischen Aktionen" -Hint "1, 2, 3, 4 und 6 nacheinander"
+        Write-MenuItem -Key "7" -Label "Chocolatey-Paketliste anzeigen"
+        Write-MenuItem -Key "A" -Label "Alles ausfuehren" -Hint "Menuepunkte 1 bis 7 nacheinander"
         Write-MenuItem -Key "0" -Label "Beenden"
         Write-Host ""
         Write-Status -Type Info -Message "Mehrfachauswahl mit Komma: z. B. 1,2,4,6"
 
-        $choices = @(Read-MultiMenuChoice -Prompt "Auswahl" -AllowedValues @("0", "1", "2", "3", "4", "5", "6") -AllValues @("1", "2", "3", "4", "6"))
+        $choices = @(Read-MultiMenuChoice -Prompt "Auswahl" -AllowedValues @("0", "1", "2", "3", "4", "5", "6", "7") -AllValues @("1", "2", "3", "4", "5", "6", "7"))
         if ($choices -contains "0") { break }
 
         $actionLabels = @{
@@ -839,13 +852,11 @@ function Show-MainMenu {
             "4" = "Taskleiste und Startmenue bereinigen"
             "5" = "Energy Center oeffnen"
             "6" = ".NET Framework 3.5 installieren"
+            "7" = "Chocolatey-Paketliste anzeigen"
         }
         $selectedLabels = @($choices | ForEach-Object { $actionLabels[$_] })
         Write-Host ""
         Write-Status -Type Info -Message "Reihenfolge: $($selectedLabels -join ' -> ')"
-        if (-not (Confirm-Action -Message "Ausgewaehlte Aktionen jetzt nacheinander ausfuehren?")) {
-            continue
-        }
 
         switch ($choices) {
             "1" {
@@ -868,6 +879,9 @@ function Show-MainMenu {
             }
             "6" {
                 Invoke-MenuAction -Title ".NET FRAMEWORK 3.5" -Action { Install-NetFramework35 } -NoWait
+            }
+            "7" {
+                Invoke-MenuAction -Title "CHOCOLATEY-PAKETLISTE" -Action { Show-ChocoPackageList } -NoWait
             }
         }
 
