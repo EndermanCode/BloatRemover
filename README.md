@@ -13,7 +13,7 @@ Das nummerierte Menue bietet:
 - Standard-Apps und Windows Updates installieren
 - Taskleiste und Startmenue bereinigen
 - .NET Framework 3.5 installieren
-- Chocolatey-Paketliste anzeigen
+- WinGet-Paketliste anzeigen
 - Energy Center mit drei Profilen und individuellen Einstellungen
 
 Im Hauptmenue koennen mehrere Aktionen auf einmal ausgewaehlt werden, zum Beispiel
@@ -29,6 +29,11 @@ HP-Dienste, Aufgaben, Verknuepfungen und Produktordner bereinigt. HP Support
 Assistant sowie seine Support-Framework-Komponenten bleiben erhalten. Treiber,
 Firmware und BIOS-Komponenten werden aus Sicherheitsgruenden nicht entfernt.
 
+Die Standard-Apps werden ueber WinGet installiert. Das Skript beendet oder
+startet Windows Explorer waehrend der Bereinigung nicht automatisch. Erst am
+Ende der ausgewaehlten Aktionen kann optional ein Explorer-Neustart ausgefuehrt
+werden.
+
 Im Energy Center lassen sich Netz- und Akkubetrieb getrennt konfigurieren:
 - Bildschirm-, Standby-, Ruhezustand- und Festplatten-Zeitlimits
 - Prozessor-Minimum und -Maximum
@@ -37,7 +42,7 @@ Im Energy Center lassen sich Netz- und Akkubetrieb getrennt konfigurieren:
 - Schnellstart und Ruhezustand jeweils aktivieren oder deaktivieren
 
 ## Zweck
-- Installiert vordefinierte Software (inkl. Chocolatey)
+- Installiert vordefinierte Software (PowerShell ueber WinGet, GUI ueber Chocolatey)
 - Fuehrt Custom-Installer aus
 - Verwalten lokaler Benutzer und Domain/Workgroup-Join
 - Setzt Energieoptionen
@@ -86,7 +91,8 @@ Wichtig:
 ## Voraussetzungen
 - Windows (lokale GUI)
 - Administratorrechte (App startet sonst nicht)
-- Optional: Internet fuer Chocolatey-Install
+- App Installer/WinGet fuer die Paketinstallation im PowerShell-Skript
+- Optional: Internet fuer WinGet- beziehungsweise Chocolatey-Installationen
 
 ## Build
 Aus dem Ordner `Executable`:

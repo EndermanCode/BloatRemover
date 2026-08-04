@@ -27,15 +27,17 @@ $HPBloat = @(
     "Clipchamp"
 )
 
-$DefaultChocoPackages = @(
-    [pscustomobject]@{ DisplayName = "Google Chrome"; Id = "googlechrome"; Params = $null; AllowLongInstall = $false }
-    [pscustomobject]@{ DisplayName = "Adobe Reader"; Id = "adobereader"; Params = $null; AllowLongInstall = $false }
-    [pscustomobject]@{ DisplayName = "7-Zip"; Id = "7zip"; Params = $null; AllowLongInstall = $false }
-    [pscustomobject]@{ DisplayName = "Mozilla Firefox"; Id = "firefox"; Params = $null; AllowLongInstall = $false }
-    [pscustomobject]@{ DisplayName = "TeamViewer Host"; Id = "teamviewer.host"; Params = $null; AllowLongInstall = $false }
-    [pscustomobject]@{ DisplayName = "Notepad++"; Id = "notepadplusplus"; Params = $null; AllowLongInstall = $false }
-    [pscustomobject]@{ DisplayName = "HP Support Assistant"; Id = "hpsupportassistant"; Params = $null; AllowLongInstall = $false }
-    [pscustomobject]@{ DisplayName = "Microsoft 365 Business"; Id = "office365business"; Params = "/eula:TRUE"; AllowLongInstall = $true }
+$DefaultWingetPackages = @(
+    [pscustomobject]@{ DisplayName = "Google Chrome"; Id = "Google.Chrome"; Name = $null; Source = "winget" }
+    [pscustomobject]@{ DisplayName = "Adobe Acrobat Reader (64-Bit)"; Id = "Adobe.Acrobat.Reader.64-bit"; Name = $null; Source = "winget" }
+    [pscustomobject]@{ DisplayName = "7-Zip"; Id = "7zip.7zip"; Name = $null; Source = "winget" }
+    [pscustomobject]@{ DisplayName = "Mozilla Firefox"; Id = "Mozilla.Firefox"; Name = $null; Source = "winget" }
+    [pscustomobject]@{ DisplayName = "TeamViewer Host"; Id = "TeamViewer.TeamViewer.Host"; Name = $null; Source = "winget" }
+    [pscustomobject]@{ DisplayName = "Notepad++"; Id = "Notepad++.Notepad++"; Name = $null; Source = "winget" }
+    # HP Support Assistant hat derzeit kein Community-Manifest. WinGet greift
+    # deshalb ueber den Namen auf die Microsoft-Store-Quelle zu.
+    [pscustomobject]@{ DisplayName = "HP Support Assistant"; Id = $null; Name = "HP Support Assistant"; Source = "msstore" }
+    [pscustomobject]@{ DisplayName = "Microsoft 365"; Id = "Microsoft.Office"; Name = $null; Source = "winget" }
 )
 
 $OsVersion = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "ProductName" -ErrorAction SilentlyContinue).ProductName
@@ -51,74 +53,77 @@ function Test-Yes {
     return $Value.Trim() -match '^(?i:y|yes|ja)$'
 }
 
-function Install-ChocoPackage {
+function Install-WingetPackage {
     param(
-        [Parameter(Mandatory)]
+        [string]$Id,
         [string]$Name,
-        [string]$Params,
-        [switch]$AllowLongInstall
+        [Parameter(Mandatory)][string]$Source
     )
 
-    $args = @("install", $Name, "-y", "--ignore-checksum", "--no-progress", "--limit-output", "--acceptlicense")
-    if ($AllowLongInstall) { $args += "--execution-timeout=0" }
-    if ($Params) { $args += @("--params", $Params) }
+    if ([string]::IsNullOrWhiteSpace($Id) -and [string]::IsNullOrWhiteSpace($Name)) {
+        throw "Fuer das WinGet-Paket fehlt ID oder Name."
+    }
 
-    Write-Host "Installing $Name..."
-    & choco @args
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Chocolatey install failed for $Name (exit code $LASTEXITCODE)."
+    $arguments = @(
+        "install"
+        "--exact"
+        "--source", $Source
+        "--silent"
+        "--accept-package-agreements"
+        "--accept-source-agreements"
+        "--disable-interactivity"
+    )
+    if ($Id) { $arguments += @("--id", $Id) } else { $arguments += @("--name", $Name) }
+
+    $packageLabel = if ($Id) { $Id } else { $Name }
+    Write-Host "  Installiere mit WinGet: $packageLabel"
+    & winget.exe @arguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        Write-Status -Type Warning -Message "WinGet-Installation von '$packageLabel' ist fehlgeschlagen (Exitcode $exitCode)."
     }
 }
 
 function Remove-ApplicationsTaskbar {
-
     foreach ($name in $names) {
-        $name = $name.Trim()
-        $packages += Get-AppxPackage | where name -match $name | Select-Object -ExpandProperty Name | Out-String
-        $packages = $packages.Trim()
-        Remove-Item "$pathTaskbar$name.lnk"
+        $shortcut = Join-Path $pathTaskbar ($name.Trim() + ".lnk")
+        Remove-Item -LiteralPath $shortcut -Force -ErrorAction SilentlyContinue
     }
-    Remove-ItemProperty -Name FavoritesRemovedChanges -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband\ -Force
-    Taskkill -F -IM Explorer.exe
-    start Explorer.exe
+    Remove-ItemProperty -Name FavoritesRemovedChanges -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband\ -Force -ErrorAction SilentlyContinue
 
     foreach ($package in $HPBloat) {
-        Get-AppxPackage *$package* | Remove-AppxPackage
+        Get-AppxPackage *$package* -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction SilentlyContinue
     }
 
+    Write-Status -Type Info -Message "Taskleisten-Aenderungen werden ohne automatischen Explorer-Neustart uebernommen."
 }
 
 function Remove-ApplicationsStartMenu {
-    
     foreach ($name in $names) {
-        $temp = Get-ChildItem -Path $pathStartmenu -Recurse | where name -match $name| Select-Object -ExpandProperty DirectoryName | Out-String
-        $temp = $temp.Trim()
-        Remove-Item "$temp\$name.lnk"
+        Get-ChildItem -Path $pathStartmenu -Filter '*.lnk' -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.BaseName -match [regex]::Escape($name.Trim()) } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
     }
 }
 
 function Install-DefaultApps {
-    Write-Host "installing Chocolatey..."
-    Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-    if (Test-Path "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1") {
-        Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1" -Force
-        refreshenv
+    if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+        throw "WinGet wurde nicht gefunden. Bitte zuerst 'App Installer' aus dem Microsoft Store installieren oder aktualisieren."
     }
-    foreach ($package in $DefaultChocoPackages) {
-        $installArguments = @{ Name = $package.Id }
-        if ($package.Params) { $installArguments.Params = $package.Params }
-        if ($package.AllowLongInstall) { $installArguments.AllowLongInstall = $true }
-        Install-ChocoPackage @installArguments
+
+    foreach ($package in $DefaultWingetPackages) {
+        Install-WingetPackage -Id $package.Id -Name $package.Name -Source $package.Source
     }
 }
 
-function Show-ChocoPackageList {
-    Write-Status -Type Info -Message "Diese Chocolatey-Pakete werden bei 'Standard-Apps installieren' der Reihe nach installiert:"
+function Show-WingetPackageList {
+    Write-Status -Type Info -Message "Diese WinGet-Pakete werden bei 'Standard-Apps installieren' der Reihe nach installiert:"
     Write-Host ""
 
-    for ($index = 0; $index -lt $DefaultChocoPackages.Count; $index++) {
-        $package = $DefaultChocoPackages[$index]
-        Write-Host ("  {0,2}. {1}  [{2}]" -f ($index + 1), $package.DisplayName, $package.Id) -ForegroundColor White
+    for ($index = 0; $index -lt $DefaultWingetPackages.Count; $index++) {
+        $package = $DefaultWingetPackages[$index]
+        $identifier = if ($package.Id) { $package.Id } else { "Name: $($package.Name)" }
+        Write-Host ("  {0,2}. {1}  [{2}: {3}]" -f ($index + 1), $package.DisplayName, $package.Source, $identifier) -ForegroundColor White
     }
 }
 
@@ -536,6 +541,53 @@ function Wait-ForUser {
     $null = Read-Host "  Enter druecken, um fortzufahren"
 }
 
+function Restart-WindowsExplorer {
+    $explorerPath = Join-Path $env:SystemRoot 'explorer.exe'
+    Write-Status -Type Info -Message "Windows Explorer wird auf Wunsch neu gestartet..."
+
+    try {
+        $runningExplorers = @(Get-Process -Name explorer -ErrorAction SilentlyContinue)
+        if ($runningExplorers.Count -gt 0) {
+            $runningExplorers | Stop-Process -Force -ErrorAction Stop
+
+            for ($attempt = 0; $attempt -lt 10; $attempt++) {
+                if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { break }
+                Start-Sleep -Milliseconds 300
+            }
+            if (Get-Process -Name explorer -ErrorAction SilentlyContinue) {
+                throw "Der laufende Explorer-Prozess konnte nicht beendet werden."
+            }
+        }
+
+        for ($startAttempt = 1; $startAttempt -le 2; $startAttempt++) {
+            Start-Process -FilePath $explorerPath -ErrorAction Stop
+            for ($check = 0; $check -lt 10; $check++) {
+                Start-Sleep -Milliseconds 300
+                if (Get-Process -Name explorer -ErrorAction SilentlyContinue) {
+                    Write-Status -Type Success -Message "Windows Explorer wurde erfolgreich gestartet."
+                    return
+                }
+            }
+        }
+
+        throw "Windows Explorer wurde nach zwei Versuchen nicht gestartet."
+    }
+    catch {
+        Write-Status -Type Error -Message "Windows Explorer konnte nicht neu gestartet werden: $($_.Exception.Message)"
+    }
+}
+
+function Request-ExplorerRestart {
+    Write-Host ""
+    $answer = Read-Host "  Windows Explorer jetzt neu starten? [j/N]"
+    if (Test-Yes $answer) {
+        Restart-WindowsExplorer
+    }
+    else {
+        Write-Status -Type Info -Message "Windows Explorer wird nicht neu gestartet. Die Aenderungen erscheinen spaetestens bei der naechsten Anmeldung."
+    }
+}
+
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -831,12 +883,12 @@ function Show-MainMenu {
         }
         Write-Host ""
         Write-MenuItem -Key "1" -Label "HP-Bloatware entfernen" -Hint "HP Apps und Zusatzprogramme"
-        Write-MenuItem -Key "2" -Label "Standard-Apps installieren" -Hint "Chocolatey-Paketliste"
+        Write-MenuItem -Key "2" -Label "Standard-Apps installieren" -Hint "WinGet-Paketliste"
         Write-MenuItem -Key "3" -Label "Windows Updates installieren"
         Write-MenuItem -Key "4" -Label "Taskleiste und Startmenue bereinigen"
         Write-MenuItem -Key "5" -Label "Energy Center" -Hint "Profile und erweiterte Energieoptionen"
         Write-MenuItem -Key "6" -Label ".NET Framework 3.5 installieren"
-        Write-MenuItem -Key "7" -Label "Chocolatey-Paketliste anzeigen"
+        Write-MenuItem -Key "7" -Label "WinGet-Paketliste anzeigen"
         Write-MenuItem -Key "A" -Label "Alles ausfuehren" -Hint "Menuepunkte 1 bis 7 nacheinander"
         Write-MenuItem -Key "0" -Label "Beenden"
         Write-Host ""
@@ -852,7 +904,7 @@ function Show-MainMenu {
             "4" = "Taskleiste und Startmenue bereinigen"
             "5" = "Energy Center oeffnen"
             "6" = ".NET Framework 3.5 installieren"
-            "7" = "Chocolatey-Paketliste anzeigen"
+            "7" = "WinGet-Paketliste anzeigen"
         }
         $selectedLabels = @($choices | ForEach-Object { $actionLabels[$_] })
         Write-Host ""
@@ -881,7 +933,7 @@ function Show-MainMenu {
                 Invoke-MenuAction -Title ".NET FRAMEWORK 3.5" -Action { Install-NetFramework35 } -NoWait
             }
             "7" {
-                Invoke-MenuAction -Title "CHOCOLATEY-PAKETLISTE" -Action { Show-ChocoPackageList } -NoWait
+                Invoke-MenuAction -Title "WINGET-PAKETLISTE" -Action { Show-WingetPackageList } -NoWait
             }
         }
 
@@ -889,6 +941,7 @@ function Show-MainMenu {
         Write-Section -Title "AUSWAHL ABGESCHLOSSEN"
         Write-Host ""
         Write-Status -Type Success -Message "Alle ausgewaehlten Aktionen wurden der Reihe nach verarbeitet."
+        Request-ExplorerRestart
         Wait-ForUser
     } while ($true)
 }
