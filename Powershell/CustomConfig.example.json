@@ -12,6 +12,16 @@
   },
   "actions": [
     {
+      "action": "replaceFile",
+      "name": "Firmenkonfiguration verteilen",
+      "type": "file",
+      "source": "Files\\company-config.ini",
+      "target": "%ProgramData%\\BeispielFirma\\config.ini",
+      "sha256": null,
+      "backupExisting": true,
+      "createDirectory": true
+    },
+    {
       "action": "uninstall",
       "name": "Alte Beispielsoftware entfernen",
       "type": "winget",

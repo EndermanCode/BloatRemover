@@ -71,6 +71,21 @@ Die WinGet-IDs muessen dabei nicht manuell gesucht oder eingegeben werden.
 Lange Checklisten scrollen automatisch; Bild auf/ab, Pos1 und Ende werden ebenfalls
 unterstuetzt. Unter der Liste werden sichtbarer Bereich und Anzahl der Markierungen angezeigt.
 
+Der Editor fuer die Aktionsreihenfolge zeigt ebenfalls die vollstaendige, scrollbare
+Aktionsliste. Mit Leertaste oder Enter wird eine Aktion aufgenommen, mit Pfeiltasten,
+Bild auf/ab, Pos1 oder Ende an die gewuenschte Position verschoben und mit Leertaste
+oder Enter wieder abgelegt. Danach koennen weitere Aktionen verschoben werden. `S`
+uebernimmt die neue Reihenfolge in den Config Editor; `Esc` verwirft sie.
+
+Mit `Datei automatisch ersetzen` koennen Profile Dateien vom USB-Stick auf feste
+Zielpfade kopieren, beispielsweise Anwendungs-Konfigurationen nach
+`%ProgramData%\Hersteller\config.ini`. Der Builder legt portable Quelldateien im
+Unterordner `Files` neben der JSON ab und speichert deren SHA-256-Pruefsumme.
+Zielordner koennen automatisch angelegt werden. Eine vorhandene Zieldatei wird
+standardmaessig zuvor unter `.BloatRemoverBackups` im Zielordner gesichert. Die
+eigentliche Ersetzung erfolgt erst beim unbeaufsichtigten Config-Start und ohne
+weitere Rueckfrage.
+
 Der Energieblock eines Profils unterstuetzt die Profile Energiesparend,
 Ausgeglichen und Leistung, eigene Zeitlimits fuer Netz- und Akkubetrieb sowie
 Schnellstart, Ruhezustand und selektives USB-Energiesparen. Nicht gesetzte Werte

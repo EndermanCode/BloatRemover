@@ -629,6 +629,107 @@ function Uninstall-DesktopProgramByName {
     }
 }
 
+function Resolve-CustomConfigSourcePath {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ConfigDirectory
+    )
+
+    $expandedPath = [Environment]::ExpandEnvironmentVariables($Path)
+    if (-not [IO.Path]::IsPathRooted($expandedPath)) {
+        $expandedPath = Join-Path $ConfigDirectory $expandedPath
+    }
+    [IO.Path]::GetFullPath($expandedPath)
+}
+
+function Resolve-CustomConfigTargetPath {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $expandedPath = [Environment]::ExpandEnvironmentVariables($Path)
+    if (-not [IO.Path]::IsPathRooted($expandedPath)) {
+        throw "Der Zielpfad muss absolut sein oder eine Windows-Umgebungsvariable enthalten: $Path"
+    }
+    $fullPath = [IO.Path]::GetFullPath($expandedPath)
+    if ([string]::IsNullOrWhiteSpace([IO.Path]::GetFileName($fullPath))) {
+        throw "Der Zielpfad muss einen Dateinamen enthalten: $Path"
+    }
+    return $fullPath
+}
+
+function Invoke-CustomFileReplacement {
+    param(
+        [Parameter(Mandatory)]$Action,
+        [Parameter(Mandatory)][string]$ConfigDirectory
+    )
+
+    $sourceValue = [string]$Action.source
+    $targetValue = [string]$Action.target
+    if ([string]::IsNullOrWhiteSpace($sourceValue)) { throw "Quelldatei fehlt." }
+    if ([string]::IsNullOrWhiteSpace($targetValue)) { throw "Zielpfad fehlt." }
+
+    $sourcePath = Resolve-CustomConfigSourcePath -Path $sourceValue -ConfigDirectory $ConfigDirectory
+    $targetPath = Resolve-CustomConfigTargetPath -Path $targetValue
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+        throw "Quelldatei wurde nicht gefunden: $sourcePath"
+    }
+    if ($sourcePath -eq $targetPath) { throw "Quell- und Zieldatei sind identisch: $sourcePath" }
+
+    $sourceHash = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256 -ErrorAction Stop).Hash
+    if (-not [string]::IsNullOrWhiteSpace([string]$Action.sha256) -and $sourceHash -ne [string]$Action.sha256) {
+        throw "SHA-256-Pruefung fuer die Quelldatei ist fehlgeschlagen."
+    }
+
+    if (Test-Path -LiteralPath $targetPath -PathType Leaf) {
+        $targetHash = (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256 -ErrorAction Stop).Hash
+        if ($targetHash -eq $sourceHash) {
+            Write-Status -Type Info -Message "Zieldatei ist bereits aktuell: $targetPath"
+            return
+        }
+    }
+
+    $targetDirectory = Split-Path -Parent $targetPath
+    $createDirectory = if ($Action.PSObject.Properties.Name -contains 'createDirectory') { $Action.createDirectory -eq $true } else { $true }
+    if (-not (Test-Path -LiteralPath $targetDirectory -PathType Container)) {
+        if (-not $createDirectory) { throw "Zielordner wurde nicht gefunden: $targetDirectory" }
+        New-Item -ItemType Directory -Path $targetDirectory -Force -ErrorAction Stop | Out-Null
+    }
+
+    $backupExisting = if ($Action.PSObject.Properties.Name -contains 'backupExisting') { $Action.backupExisting -eq $true } else { $true }
+    if ($backupExisting -and (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
+        $backupDirectory = Join-Path $targetDirectory '.BloatRemoverBackups'
+        New-Item -ItemType Directory -Path $backupDirectory -Force -ErrorAction Stop | Out-Null
+        $backupName = "{0}.{1}.bak" -f ([IO.Path]::GetFileName($targetPath)), (Get-Date -Format 'yyyyMMdd-HHmmssfff')
+        $backupPath = Join-Path $backupDirectory $backupName
+        Copy-Item -LiteralPath $targetPath -Destination $backupPath -Force -ErrorAction Stop
+        Write-Status -Type Info -Message "Sicherung erstellt: $backupPath"
+    }
+
+    $temporaryPath = Join-Path $targetDirectory (".bloatremover-{0}.tmp" -f ([guid]::NewGuid()).ToString('N'))
+    $replaceBackupPath = $temporaryPath + '.replaced'
+    try {
+        Copy-Item -LiteralPath $sourcePath -Destination $temporaryPath -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $targetPath -PathType Leaf) {
+            [IO.File]::Replace($temporaryPath, $targetPath, $replaceBackupPath, $true)
+            Remove-Item -LiteralPath $replaceBackupPath -Force -ErrorAction SilentlyContinue
+        }
+        else {
+            Move-Item -LiteralPath $temporaryPath -Destination $targetPath -Force -ErrorAction Stop
+        }
+
+        $resultHash = (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256 -ErrorAction Stop).Hash
+        if ($resultHash -ne $sourceHash) { throw "Pruefsumme der geschriebenen Zieldatei stimmt nicht ueberein." }
+        Write-Status -Type Success -Message "Datei wurde ersetzt: $targetPath"
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $replaceBackupPath -PathType Leaf) {
+            Remove-Item -LiteralPath $replaceBackupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Read-RequiredValue {
     param([Parameter(Mandatory)][string]$Prompt)
 
@@ -819,8 +920,9 @@ function New-CustomInstallConfig {
         Write-MenuItem -Key "4" -Label "Programm deinstallieren" -Hint "per WinGet-ID oder exaktem Programmnamen"
         Write-MenuItem -Key "5" -Label "Store-Apps deinstallieren" -Hint "installierte Apps per Checkliste auswaehlen"
         Write-MenuItem -Key "6" -Label "Programme und Features deinstallieren" -Hint "klassische Desktop-Programme per Checkliste"
+        Write-MenuItem -Key "7" -Label "Datei automatisch ersetzen" -Hint "z. B. Konfigurationsdatei vom USB-Stick"
         Write-MenuItem -Key "0" -Label "Builder abschliessen"
-        $typeChoice = Read-MenuChoice -Prompt "Aktion" -AllowedValues @("0", "1", "2", "3", "4", "5", "6")
+        $typeChoice = Read-MenuChoice -Prompt "Aktion" -AllowedValues @("0", "1", "2", "3", "4", "5", "6", "7")
         if ($typeChoice -eq "0") { break }
 
         if ($typeChoice -eq "1") {
@@ -866,6 +968,37 @@ function New-CustomInstallConfig {
 
         if ($typeChoice -eq "6") {
             Add-DesktopProgramUninstallSelections -Actions $actions
+            $continueAnswer = Read-Host "  Weitere Aktion hinzufuegen? [J/n]"
+            if ($continueAnswer -match '^(?i:n|nein|no)$') { break }
+            continue
+        }
+
+        if ($typeChoice -eq "7") {
+            $displayName = Read-RequiredValue -Prompt "Anzeigename der Datei-Aktion"
+            $sourcePath = Read-RequiredValue -Prompt "Vollstaendiger Pfad zur Quelldatei"
+            if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                Write-Status -Type Warning -Message "Quelldatei wurde nicht gefunden. Die Aktion wird nicht hinzugefuegt."
+                continue
+            }
+            $targetPath = Read-RequiredValue -Prompt "Zieldatei, z. B. %ProgramData%\Hersteller\config.ini"
+            try { $null = Resolve-CustomConfigTargetPath -Path $targetPath }
+            catch {
+                Write-Status -Type Warning -Message $_.Exception.Message
+                continue
+            }
+            $copyAnswer = Read-Host "  Quelldatei portabel in den Config-Ordner kopieren? [J/n]"
+            $backupAnswer = Read-Host "  Vorhandene Zieldatei vor dem Ersetzen sichern? [J/n]"
+            $actions.Add([pscustomobject]@{
+                Action = 'replaceFile'
+                Name = $displayName
+                Type = 'file'
+                SourcePath = (Resolve-Path -LiteralPath $sourcePath).Path
+                TargetPath = $targetPath
+                CopyToConfig = $copyAnswer -notmatch '^(?i:n|nein|no)$'
+                BackupExisting = $backupAnswer -notmatch '^(?i:n|nein|no)$'
+                CreateDirectory = $true
+            })
+            Write-Status -Type Success -Message "'$displayName' wurde vorgemerkt."
             $continueAnswer = Read-Host "  Weitere Aktion hinzufuegen? [J/n]"
             if ($continueAnswer -match '^(?i:n|nein|no)$') { break }
             continue
@@ -955,9 +1088,33 @@ function New-CustomInstallConfig {
 
     $outputDirectory = Select-ConfigOutputDirectory
     $installerDirectory = Join-Path $outputDirectory 'Installers'
+    $filePayloadDirectory = Join-Path $outputDirectory 'Files'
     $serializedActions = [System.Collections.Generic.List[object]]::new()
 
     foreach ($action in $actions) {
+        if ($action.Action -eq 'replaceFile') {
+            $savedPath = $action.SourcePath
+            $hash = (Get-FileHash -LiteralPath $action.SourcePath -Algorithm SHA256 -ErrorAction Stop).Hash
+            if ($action.CopyToConfig) {
+                New-Item -ItemType Directory -Path $filePayloadDirectory -Force -ErrorAction Stop | Out-Null
+                $destination = Get-UniqueInstallerDestination -Directory $filePayloadDirectory -FileName ([IO.Path]::GetFileName($action.SourcePath))
+                Write-Host "  Kopiere Datei: $($action.Name)"
+                Copy-Item -LiteralPath $action.SourcePath -Destination $destination -ErrorAction Stop
+                $savedPath = "Files\$([IO.Path]::GetFileName($destination))"
+            }
+            $serializedActions.Add([ordered]@{
+                action = 'replaceFile'
+                name = $action.Name
+                type = 'file'
+                source = $savedPath
+                target = $action.TargetPath
+                sha256 = $hash
+                backupExisting = [bool]$action.BackupExisting
+                createDirectory = [bool]$action.CreateDirectory
+            })
+            continue
+        }
+
         if ($action.Action -eq 'uninstall') {
             if ($action.Type -eq 'appx') {
                 $serializedActions.Add([ordered]@{
@@ -1034,8 +1191,11 @@ function New-CustomInstallConfig {
     [IO.File]::WriteAllText($configPath, $json, $utf8WithoutBom)
     Write-Host ""
     Write-Status -Type Success -Message "Konfiguration gespeichert: $configPath"
-    if ($actions | Where-Object { $_.CopyToConfig }) {
+    if ($actions | Where-Object { $_.Action -eq 'install' -and $_.CopyToConfig }) {
         Write-Status -Type Success -Message "Die ausgewaehlten Installer wurden portabel in den Unterordner 'Installers' kopiert."
+    }
+    if ($actions | Where-Object { $_.Action -eq 'replaceFile' -and $_.CopyToConfig }) {
+        Write-Status -Type Success -Message "Die Quelldateien wurden portabel in den Unterordner 'Files' kopiert."
     }
 }
 
@@ -1156,9 +1316,10 @@ function Invoke-StartupConfigCheck {
 function Get-CustomActionSummary {
     param([Parameter(Mandatory)]$Action)
 
-    $mode = if (([string]$Action.action).ToLowerInvariant() -eq 'uninstall') { 'Deinstallieren' } else { 'Installieren' }
+    $actionMode = ([string]$Action.action).ToLowerInvariant()
+    $mode = if ($actionMode -eq 'uninstall') { 'Deinstallieren' } elseif ($actionMode -eq 'replacefile') { 'Datei ersetzen' } else { 'Installieren' }
     $type = ([string]$Action.type).ToUpperInvariant()
-    $target = if ($Action.id) { $Action.id } elseif ($Action.matchName) { $Action.matchName } elseif ($Action.packageName) { $Action.packageName } elseif ($Action.path) { $Action.path } else { '-' }
+    $target = if ($Action.id) { $Action.id } elseif ($Action.matchName) { $Action.matchName } elseif ($Action.packageName) { $Action.packageName } elseif ($Action.target) { $Action.target } elseif ($Action.path) { $Action.path } else { '-' }
     return "$mode | $type | $target"
 }
 
@@ -1205,6 +1366,174 @@ function Select-CustomActionIndex {
         if ($number -ge 1 -and $number -le $Actions.Count) { return ($number - 1) }
         Write-Status -Type Warning -Message "Ungueltige Aktionsnummer."
     } while ($true)
+}
+
+function Move-CustomActionListItem {
+    param(
+        [Parameter(Mandatory)]$List,
+        [Parameter(Mandatory)][int]$From,
+        [Parameter(Mandatory)][int]$To
+    )
+
+    if ($From -eq $To) { return }
+    $item = $List[$From]
+    $List.RemoveAt($From)
+    $List.Insert($To, $item)
+}
+
+function Edit-CustomActionOrderFallback {
+    param([Parameter(Mandatory)]$Actions)
+
+    $working = [System.Collections.Generic.List[object]]::new()
+    foreach ($action in $Actions) { $working.Add($action) }
+
+    while ($true) {
+        Write-Host ""
+        Write-Section -Title "AKTIONSREIHENFOLGE"
+        for ($index = 0; $index -lt $working.Count; $index++) {
+            Write-MenuItem -Key ([string]($index + 1)) -Label $working[$index].name -Hint (Get-CustomActionSummary -Action $working[$index])
+        }
+        Write-MenuItem -Key "S" -Label "Reihenfolge uebernehmen"
+        Write-MenuItem -Key "0" -Label "Aenderungen verwerfen"
+
+        $choice = (Read-Host "  Zu verschiebende Aktion").Trim()
+        if ($choice -match '^(?i:s)$') {
+            $Actions.Clear()
+            foreach ($action in $working) { $Actions.Add($action) }
+            return
+        }
+        if ($choice -eq '0') { return }
+
+        $from = 0
+        if (-not [int]::TryParse($choice, [ref]$from) -or $from -lt 1 -or $from -gt $working.Count) {
+            Write-Status -Type Warning -Message "Ungueltige Aktionsnummer."
+            continue
+        }
+        $targetValue = Read-Host "  Neue Position (1-$($working.Count))"
+        $to = 0
+        if (-not [int]::TryParse($targetValue, [ref]$to) -or $to -lt 1 -or $to -gt $working.Count) {
+            Write-Status -Type Warning -Message "Ungueltige Zielposition."
+            continue
+        }
+        Move-CustomActionListItem -List $working -From ($from - 1) -To ($to - 1)
+    }
+}
+
+function Edit-CustomActionOrder {
+    param([Parameter(Mandatory)]$Actions)
+
+    if ($Actions.Count -lt 2) {
+        Write-Status -Type Warning -Message "Zum Aendern der Reihenfolge sind mindestens zwei Aktionen erforderlich."
+        return
+    }
+    if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
+        Edit-CustomActionOrderFallback -Actions $Actions
+        return
+    }
+
+    $working = [System.Collections.Generic.List[object]]::new()
+    foreach ($action in $Actions) { $working.Add($action) }
+    $currentIndex = 0
+    $scrollOffset = 0
+    $moving = $false
+    $pickedOriginalIndex = -1
+    $listTop = 0
+    $viewportSize = 0
+    $originalCursorVisible = $true
+
+    try {
+        $originalCursorVisible = [Console]::CursorVisible
+        [Console]::CursorVisible = $false
+        Write-Host ""
+        Write-Status -Type Info -Message "Pfeile/Bild/Pos1/Ende: bewegen | Leertaste/Enter: aufnehmen oder ablegen | S: uebernehmen | Esc: verwerfen"
+        $viewportSize = [Math]::Min($working.Count, [Math]::Max(3, [Console]::WindowHeight - 6))
+        for ($row = 0; $row -le $viewportSize; $row++) { Write-Host "" }
+        $listTop = [Console]::CursorTop - ($viewportSize + 1)
+
+        while ($true) {
+            $width = [Math]::Max(20, [Console]::WindowWidth - 1)
+            if ($currentIndex -lt $scrollOffset) { $scrollOffset = $currentIndex }
+            if ($currentIndex -ge ($scrollOffset + $viewportSize)) {
+                $scrollOffset = $currentIndex - $viewportSize + 1
+            }
+
+            for ($row = 0; $row -lt $viewportSize; $row++) {
+                $index = $scrollOffset + $row
+                [Console]::SetCursorPosition(0, $listTop + $row)
+                if ($index -ge $working.Count) {
+                    [Console]::Write(('').PadRight($width))
+                    continue
+                }
+                $cursor = if ($index -eq $currentIndex) { '>' } else { ' ' }
+                $moveMarker = if ($moving -and $index -eq $currentIndex) { '[MOVE]' } else { '      ' }
+                $summary = Get-CustomActionSummary -Action $working[$index]
+                $line = " $cursor $moveMarker $($index + 1). $($working[$index].name)  [$summary]"
+                if ($line.Length -gt $width) { $line = $line.Substring(0, $width) }
+                [Console]::Write($line.PadRight($width))
+            }
+
+            $modeText = if ($moving) { "VERSCHIEBEN: '$($working[$currentIndex].name)' - mit Enter/Leertaste hier ablegen" } else { "AUSWAEHLEN: Aktion markieren und mit Enter/Leertaste aufnehmen" }
+            if ($modeText.Length -gt $width) { $modeText = $modeText.Substring(0, $width) }
+            [Console]::SetCursorPosition(0, $listTop + $viewportSize)
+            [Console]::Write(("   $modeText").PadRight($width))
+
+            $key = [Console]::ReadKey($true)
+            if ($key.Key -in @('Spacebar', 'Enter')) {
+                if ($moving) {
+                    $moving = $false
+                    $pickedOriginalIndex = -1
+                }
+                else {
+                    $moving = $true
+                    $pickedOriginalIndex = $currentIndex
+                }
+                continue
+            }
+            if ($key.Key -eq 'S') {
+                $Actions.Clear()
+                foreach ($action in $working) { $Actions.Add($action) }
+                [Console]::SetCursorPosition(0, $listTop + $viewportSize + 1)
+                Write-Status -Type Success -Message "Neue Aktionsreihenfolge wurde in den Editor uebernommen."
+                return
+            }
+            if ($key.Key -eq 'Escape') {
+                if ($moving) {
+                    Move-CustomActionListItem -List $working -From $currentIndex -To $pickedOriginalIndex
+                    $currentIndex = $pickedOriginalIndex
+                    $moving = $false
+                    $pickedOriginalIndex = -1
+                    continue
+                }
+                [Console]::SetCursorPosition(0, $listTop + $viewportSize + 1)
+                Write-Status -Type Info -Message "Aenderungen an der Reihenfolge wurden verworfen."
+                return
+            }
+
+            $targetIndex = $currentIndex
+            switch ($key.Key) {
+                'UpArrow' { $targetIndex = [Math]::Max(0, $currentIndex - 1) }
+                'DownArrow' { $targetIndex = [Math]::Min($working.Count - 1, $currentIndex + 1) }
+                'PageUp' { $targetIndex = [Math]::Max(0, $currentIndex - $viewportSize) }
+                'PageDown' { $targetIndex = [Math]::Min($working.Count - 1, $currentIndex + $viewportSize) }
+                'Home' { $targetIndex = 0 }
+                'End' { $targetIndex = $working.Count - 1 }
+            }
+            if ($targetIndex -ne $currentIndex) {
+                if ($moving) {
+                    Move-CustomActionListItem -List $working -From $currentIndex -To $targetIndex
+                }
+                $currentIndex = $targetIndex
+            }
+        }
+    }
+    catch {
+        try { [Console]::SetCursorPosition(0, $listTop + $viewportSize + 1) } catch {}
+        Write-Status -Type Warning -Message "Grafischer Reihenfolge-Editor ist in diesem Host nicht verfuegbar."
+        Edit-CustomActionOrderFallback -Actions $Actions
+    }
+    finally {
+        try { [Console]::CursorVisible = $originalCursorVisible } catch {}
+    }
 }
 
 function Save-CustomConfigObject {
@@ -1257,10 +1586,11 @@ function Edit-CustomConfig {
         Write-MenuItem -Key "5" -Label "Desktop-Programm deinstallieren" -Hint "WinGet"
         Write-MenuItem -Key "6" -Label "Store-Apps deinstallieren" -Hint "installierte Apps per Checkliste"
         Write-MenuItem -Key "7" -Label "Programme und Features deinstallieren" -Hint "Desktop-Programme per Checkliste"
-        Write-MenuItem -Key "8" -Label "EXE/MSI-Installer hinzufuegen"
-        Write-MenuItem -Key "9" -Label "Aktion bearbeiten"
-        Write-MenuItem -Key "10" -Label "Aktion entfernen"
-        Write-MenuItem -Key "11" -Label "Aktionsreihenfolge aendern"
+        Write-MenuItem -Key "8" -Label "Datei automatisch ersetzen" -Hint "Quelldatei in Config einbetten"
+        Write-MenuItem -Key "9" -Label "EXE/MSI-Installer hinzufuegen"
+        Write-MenuItem -Key "10" -Label "Aktion bearbeiten"
+        Write-MenuItem -Key "11" -Label "Aktion entfernen"
+        Write-MenuItem -Key "12" -Label "Aktionsreihenfolge aendern"
         Write-MenuItem -Key "S" -Label "Speichern und Editor schliessen"
         Write-MenuItem -Key "0" -Label "Ohne Speichern schliessen"
         $choice = (Read-Host "  Auswahl").Trim().ToLowerInvariant()
@@ -1312,6 +1642,38 @@ function Edit-CustomConfig {
                 Add-DesktopProgramUninstallSelections -Actions $actions
             }
             "8" {
+                $name = Read-RequiredValue -Prompt "Anzeigename der Datei-Aktion"
+                $sourcePath = Read-RequiredValue -Prompt "Vollstaendiger Pfad zur Quelldatei"
+                if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                    Write-Status -Type Warning -Message "Quelldatei wurde nicht gefunden."
+                    break
+                }
+                $targetPath = Read-RequiredValue -Prompt "Zieldatei, z. B. %ProgramData%\Hersteller\config.ini"
+                try { $null = Resolve-CustomConfigTargetPath -Path $targetPath }
+                catch {
+                    Write-Status -Type Warning -Message $_.Exception.Message
+                    break
+                }
+
+                $copyAnswer = Read-Host "  Quelldatei in den portablen Config-Ordner kopieren? [J/n]"
+                $savedPath = (Resolve-Path -LiteralPath $sourcePath).Path
+                if ($copyAnswer -notmatch '^(?i:n|nein|no)$') {
+                    $filePayloadDirectory = Join-Path $configDirectory 'Files'
+                    New-Item -ItemType Directory -Path $filePayloadDirectory -Force -ErrorAction Stop | Out-Null
+                    $destination = Get-UniqueInstallerDestination -Directory $filePayloadDirectory -FileName ([IO.Path]::GetFileName($savedPath))
+                    Copy-Item -LiteralPath $savedPath -Destination $destination -ErrorAction Stop
+                    $savedPath = "Files\$([IO.Path]::GetFileName($destination))"
+                }
+                $sourceForHash = Resolve-CustomConfigSourcePath -Path $savedPath -ConfigDirectory $configDirectory
+                $backupAnswer = Read-Host "  Vorhandene Zieldatei vor dem Ersetzen sichern? [J/n]"
+                $actions.Add([pscustomobject][ordered]@{
+                    action = 'replaceFile'; name = $name; type = 'file'
+                    source = $savedPath; target = $targetPath
+                    sha256 = (Get-FileHash -LiteralPath $sourceForHash -Algorithm SHA256 -ErrorAction Stop).Hash
+                    backupExisting = $backupAnswer -notmatch '^(?i:n|nein|no)$'; createDirectory = $true
+                })
+            }
+            "9" {
                 $installerChoice = Read-MenuChoice -Prompt "1 = EXE, 2 = MSI" -AllowedValues @("1", "2")
                 $type = if ($installerChoice -eq "1") { 'exe' } else { 'msi' }
                 $name = Read-RequiredValue -Prompt "Anzeigename"
@@ -1341,13 +1703,14 @@ function Edit-CustomConfig {
                     arguments = $arguments; sha256 = $hash; successExitCodes = @(0, 1641, 3010)
                 })
             }
-            "9" {
+            "10" {
                 $index = Select-CustomActionIndex -Actions @($actions) -Prompt "Aktion bearbeiten"
                 if ($index -ge 0) {
                     $action = $actions[$index]
                     $newName = (Read-Host "  Anzeigename [$($action.name)]").Trim()
                     if ($newName) { $action | Add-Member -NotePropertyName name -NotePropertyValue $newName -Force }
-                    if (([string]$action.action).ToLowerInvariant() -eq 'uninstall') {
+                    $actionMode = ([string]$action.action).ToLowerInvariant()
+                    if ($actionMode -eq 'uninstall') {
                         if (([string]$action.type).ToLowerInvariant() -eq 'appx') {
                             Write-Status -Type Info -Message "Store-App-Kennung: $($action.packageName) (wird ueber die Checkliste festgelegt)"
                         }
@@ -1358,6 +1721,26 @@ function Edit-CustomConfig {
                         else {
                             $newMatchName = (Read-Host "  Installierter Programmname [$($action.matchName)]").Trim()
                             if ($newMatchName) { $action | Add-Member -NotePropertyName matchName -NotePropertyValue $newMatchName -Force }
+                        }
+                    }
+                    elseif ($actionMode -eq 'replacefile') {
+                        $newSource = (Read-Host "  Quelldatei [$($action.source)]").Trim()
+                        if ($newSource) {
+                            try {
+                                $resolvedSource = Resolve-CustomConfigSourcePath -Path $newSource -ConfigDirectory $configDirectory
+                                if (-not (Test-Path -LiteralPath $resolvedSource -PathType Leaf)) { throw "Quelldatei wurde nicht gefunden: $resolvedSource" }
+                                $action | Add-Member -NotePropertyName source -NotePropertyValue $newSource -Force
+                                $action | Add-Member -NotePropertyName sha256 -NotePropertyValue ((Get-FileHash -LiteralPath $resolvedSource -Algorithm SHA256 -ErrorAction Stop).Hash) -Force
+                            }
+                            catch { Write-Status -Type Warning -Message $_.Exception.Message }
+                        }
+                        $newTarget = (Read-Host "  Zieldatei [$($action.target)]").Trim()
+                        if ($newTarget) {
+                            try {
+                                $null = Resolve-CustomConfigTargetPath -Path $newTarget
+                                $action | Add-Member -NotePropertyName target -NotePropertyValue $newTarget -Force
+                            }
+                            catch { Write-Status -Type Warning -Message $_.Exception.Message }
                         }
                     }
                     elseif ($action.path) {
@@ -1371,21 +1754,12 @@ function Edit-CustomConfig {
                     }
                 }
             }
-            "10" {
+            "11" {
                 $index = Select-CustomActionIndex -Actions @($actions) -Prompt "Aktion entfernen"
                 if ($index -ge 0) { $actions.RemoveAt($index) }
             }
-            "11" {
-                $index = Select-CustomActionIndex -Actions @($actions) -Prompt "Aktion verschieben"
-                if ($index -ge 0) {
-                    $direction = Read-MenuChoice -Prompt "1 = nach oben, 2 = nach unten" -AllowedValues @("1", "2")
-                    $target = if ($direction -eq "1") { $index - 1 } else { $index + 1 }
-                    if ($target -ge 0 -and $target -lt $actions.Count) {
-                        $temporary = $actions[$target]
-                        $actions[$target] = $actions[$index]
-                        $actions[$index] = $temporary
-                    }
-                }
+            "12" {
+                Edit-CustomActionOrder -Actions $actions
             }
             "s" {
                 if ($actions.Count -eq 0 -and $null -eq $config.energy) {
@@ -1489,7 +1863,7 @@ function Install-CustomConfig {
 
     Write-Host ""
     Write-Status -Type Info -Message "Profil: $($config.name)"
-    Write-Status -Type Info -Message "$($actions.Count) Programm-Aktion(en) werden jetzt ohne weitere Rueckfragen ausgefuehrt."
+    Write-Status -Type Info -Message "$($actions.Count) Config-Aktion(en) werden jetzt ohne weitere Rueckfragen ausgefuehrt."
 
     $configDirectory = Split-Path -Parent $configPath
     $failedActions = 0
@@ -1497,13 +1871,17 @@ function Install-CustomConfig {
         Write-Host ""
         $actionMode = ([string]$action.action).ToLowerInvariant()
         if ([string]::IsNullOrWhiteSpace($actionMode)) { $actionMode = 'install' }
-        $verb = if ($actionMode -eq 'uninstall') { 'Deinstalliere' } else { 'Installiere' }
+        $verb = if ($actionMode -eq 'uninstall') { 'Deinstalliere' } elseif ($actionMode -eq 'replacefile') { 'Ersetze Datei' } else { 'Installiere' }
         Write-Status -Type Info -Message "$verb`: $($action.name)"
         try {
-            if ($actionMode -notin @('install', 'uninstall')) {
-                throw "Unbekannte Aktion '$actionMode'. Erlaubt sind install und uninstall."
+            if ($actionMode -notin @('install', 'uninstall', 'replacefile')) {
+                throw "Unbekannte Aktion '$actionMode'. Erlaubt sind install, uninstall und replaceFile."
             }
-            if ($actionMode -eq 'uninstall') {
+            if ($actionMode -eq 'replacefile') {
+                if (([string]$action.type).ToLowerInvariant() -ne 'file') { throw "Datei-Aktionen muessen den Typ 'file' verwenden." }
+                Invoke-CustomFileReplacement -Action $action -ConfigDirectory $configDirectory
+            }
+            elseif ($actionMode -eq 'uninstall') {
                 $type = ([string]$action.type).ToLowerInvariant()
                 if ($type -eq 'appx') {
                     Uninstall-StoreAppPackage -PackageName ([string]$action.packageName) -PackageFamilyName ([string]$action.packageFamilyName)
