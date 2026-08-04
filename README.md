@@ -34,6 +34,37 @@ startet Windows Explorer waehrend der Bereinigung nicht automatisch. Erst am
 Ende der ausgewaehlten Aktionen kann optional ein Explorer-Neustart ausgefuehrt
 werden.
 
+## PowerShell JSON Config Builder
+
+Im Hauptmenue stehen zwei zusaetzliche Werkzeuge bereit:
+
+- `B`: Erstellt gefuehrt ein externes JSON-Profil und speichert es lokal oder
+  unter `BloatRemoverConfigs` auf einem erkannten USB-Stick.
+- `C`: Waehlt ein vorhandenes JSON-Profil aus und fuehrt danach alle enthaltenen
+  Aktionen ohne weitere Rueckfragen aus.
+
+Profile koennen WinGet-, EXE- und MSI-Installationen sowie Deinstallationen per
+exakter WinGet-ID oder installiertem Programmnamen enthalten. EXE/MSI-Dateien
+koennen in den portablen Unterordner `Installers` kopiert werden. Dabei werden
+relative Pfade und eine SHA-256-Pruefsumme in der JSON-Datei gespeichert.
+
+Fuer einen komplett unbeaufsichtigten Start kann die JSON-Datei direkt als
+Parameter uebergeben werden:
+
+```powershell
+.\Powershell\BloatRemover.ps1 -ConfigPath "E:\BloatRemoverConfigs\SAP-Arbeitsplatz.json"
+```
+
+Nach dem Laden laufen alle Aktionen in der Reihenfolge der JSON-Datei. Es gibt
+keine Programmauswahl, Bestaetigung oder abschliessende Eingabe. Ob Explorer
+anschliessend neu gestartet wird, legt das Feld `restartExplorer` im Profil fest.
+Das Skript selbst muss fuer neue Programme oder Profile nicht bearbeitet werden.
+Bei EXE-Paketen muessen funktionierende Silent-Parameter eingetragen werden;
+andernfalls kann der Hersteller-Installer selbst weiterhin Eingaben verlangen.
+Der Aufbau ist zusaetzlich in `Powershell\CustomConfig.example.json` dokumentiert;
+die dortigen Namen und SAP-Parameter sind nur Beispiele und muessen zum echten
+Herstellerpaket passen.
+
 Im Energy Center lassen sich Netz- und Akkubetrieb getrennt konfigurieren:
 - Bildschirm-, Standby-, Ruhezustand- und Festplatten-Zeitlimits
 - Prozessor-Minimum und -Maximum
@@ -83,7 +114,7 @@ Wichtig:
 - Wenn weiterhin keine Installer gefunden werden, kann optional ueber winget (Internet) installiert werden.
 - InstallReport wird unter `MigrationBackup\\Programs\\InstallReport.txt` abgelegt.
 
-## Config-Datei
+## GUI Config-Datei
 - Datei: `config.ini` im gleichen Ordner wie die EXE
 - Enthalten: App-Liste, Presets, Power-Optionen, Custom-Presets, User, Join
 - Nicht enthalten: Browser-Backup Einstellungen (Absicht)

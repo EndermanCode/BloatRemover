@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 2,
+  "name": "Beispiel-SAP-Arbeitsplatz",
+  "createdAt": "2026-08-04T00:00:00.0000000+02:00",
+  "restartExplorer": false,
+  "actions": [
+    {
+      "action": "uninstall",
+      "name": "Alte Beispielsoftware entfernen",
+      "type": "winget",
+      "id": null,
+      "matchName": "Alte Beispielsoftware"
+    },
+    {
+      "action": "install",
+      "name": "7-Zip",
+      "type": "winget",
+      "id": "7zip.7zip",
+      "source": "winget"
+    },
+    {
+      "action": "install",
+      "name": "SAP GUI",
+      "type": "exe",
+      "path": "Installers\\SAPSetup.exe",
+      "arguments": "/Silent",
+      "sha256": null,
+      "successExitCodes": [
+        0,
+        1641,
+        3010
+      ]
+    }
+  ]
+}

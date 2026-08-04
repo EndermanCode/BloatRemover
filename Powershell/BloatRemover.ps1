@@ -1,3 +1,8 @@
+[CmdletBinding()]
+param(
+    [string]$ConfigPath
+)
+
 $names = @(
     "HP Wolf Security"
     "TCO Certified"
@@ -44,6 +49,7 @@ $OsVersion = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\Curren
 $pathTaskbar = "$env:USERPROFILE\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\"
 $pathStartmenu = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\"
 $ErrorActionPreference = 'Continue'
+$script:CustomConfigExecuted = $false
 
 function Test-Yes {
     param([string]$Value)
@@ -57,11 +63,15 @@ function Install-WingetPackage {
     param(
         [string]$Id,
         [string]$Name,
-        [Parameter(Mandatory)][string]$Source
+        [Parameter(Mandatory)][string]$Source,
+        [switch]$ThrowOnError
     )
 
     if ([string]::IsNullOrWhiteSpace($Id) -and [string]::IsNullOrWhiteSpace($Name)) {
         throw "Fuer das WinGet-Paket fehlt ID oder Name."
+    }
+    if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+        throw "WinGet wurde nicht gefunden."
     }
 
     $arguments = @(
@@ -77,10 +87,43 @@ function Install-WingetPackage {
 
     $packageLabel = if ($Id) { $Id } else { $Name }
     Write-Host "  Installiere mit WinGet: $packageLabel"
-    & winget.exe @arguments
+    & winget.exe @arguments 2>&1 | ForEach-Object { Write-Host "  $_" }
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
-        Write-Status -Type Warning -Message "WinGet-Installation von '$packageLabel' ist fehlgeschlagen (Exitcode $exitCode)."
+        $message = "WinGet-Installation von '$packageLabel' ist fehlgeschlagen (Exitcode $exitCode)."
+        if ($ThrowOnError) { throw $message }
+        Write-Status -Type Warning -Message $message
+    }
+}
+
+function Uninstall-WingetPackage {
+    param(
+        [string]$Id,
+        [string]$Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Id) -and [string]::IsNullOrWhiteSpace($Name)) {
+        throw "Fuer die WinGet-Deinstallation fehlt ID oder Name."
+    }
+    if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+        throw "WinGet wurde nicht gefunden."
+    }
+
+    $arguments = @(
+        "uninstall"
+        "--exact"
+        "--silent"
+        "--accept-source-agreements"
+        "--disable-interactivity"
+    )
+    if ($Id) { $arguments += @("--id", $Id) } else { $arguments += @("--name", $Name) }
+
+    $packageLabel = if ($Id) { $Id } else { $Name }
+    Write-Host "  Deinstalliere mit WinGet: $packageLabel"
+    & winget.exe @arguments 2>&1 | ForEach-Object { Write-Host "  $_" }
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "WinGet-Deinstallation von '$packageLabel' ist fehlgeschlagen (Exitcode $exitCode)."
     }
 }
 
@@ -125,6 +168,439 @@ function Show-WingetPackageList {
         $identifier = if ($package.Id) { $package.Id } else { "Name: $($package.Name)" }
         Write-Host ("  {0,2}. {1}  [{2}: {3}]" -f ($index + 1), $package.DisplayName, $package.Source, $identifier) -ForegroundColor White
     }
+}
+
+function Read-RequiredValue {
+    param([Parameter(Mandatory)][string]$Prompt)
+
+    do {
+        $value = (Read-Host "  $Prompt").Trim()
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+        Write-Status -Type Warning -Message "Die Eingabe darf nicht leer sein."
+    } while ($true)
+}
+
+function Get-RemovableConfigDrives {
+    @(
+        Get-CimInstance Win32_LogicalDisk -Filter 'DriveType = 2' -ErrorAction SilentlyContinue |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_.DeviceID) } |
+            Sort-Object DeviceID
+    )
+}
+
+function Select-ConfigOutputDirectory {
+    $usbDrives = @(Get-RemovableConfigDrives)
+
+    Write-Host ""
+    Write-Section -Title "SPEICHERZIEL"
+    if ($usbDrives.Count -gt 0) {
+        for ($index = 0; $index -lt $usbDrives.Count; $index++) {
+            $drive = $usbDrives[$index]
+            $label = if ($drive.VolumeName) { $drive.VolumeName } else { "USB-Laufwerk" }
+            Write-MenuItem -Key ([string]($index + 1)) -Label "$($drive.DeviceID)  $label"
+        }
+    }
+    else {
+        Write-Status -Type Warning -Message "Es wurde kein Wechseldatentraeger automatisch erkannt."
+    }
+    Write-MenuItem -Key "M" -Label "Ordnerpfad manuell eingeben"
+
+    do {
+        $choice = (Read-Host "  Speicherziel").Trim()
+        $number = 0
+        if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $usbDrives.Count) {
+            $directory = Join-Path $usbDrives[$number - 1].DeviceID 'BloatRemoverConfigs'
+            New-Item -ItemType Directory -Path $directory -Force -ErrorAction Stop | Out-Null
+            return $directory
+        }
+        if ($choice -match '^(?i:m|manuell)$') {
+            $directory = Read-RequiredValue -Prompt "Zielordner, z. B. E:\BloatRemoverConfigs"
+            New-Item -ItemType Directory -Path $directory -Force -ErrorAction Stop | Out-Null
+            return (Resolve-Path -LiteralPath $directory -ErrorAction Stop).Path
+        }
+        Write-Status -Type Warning -Message "Bitte ein USB-Laufwerk oder M waehlen."
+    } while ($true)
+}
+
+function Get-UniqueInstallerDestination {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [Parameter(Mandatory)][string]$FileName
+    )
+
+    $destination = Join-Path $Directory $FileName
+    if (-not (Test-Path -LiteralPath $destination)) { return $destination }
+
+    $baseName = [IO.Path]::GetFileNameWithoutExtension($FileName)
+    $extension = [IO.Path]::GetExtension($FileName)
+    for ($suffix = 2; $suffix -lt 1000; $suffix++) {
+        $destination = Join-Path $Directory ("{0}-{1}{2}" -f $baseName, $suffix, $extension)
+        if (-not (Test-Path -LiteralPath $destination)) { return $destination }
+    }
+    throw "Fuer '$FileName' konnte kein freier Dateiname erzeugt werden."
+}
+
+function New-CustomInstallConfig {
+    Write-Banner
+    Write-Section -Title "JSON CONFIG BUILDER"
+    Write-Host ""
+    Write-Status -Type Info -Message "Unterstuetzt werden WinGet-Pakete sowie lokale oder freigegebene EXE-/MSI-Installer."
+    Write-Status -Type Info -Message "EXE-Parameter muessen zum jeweiligen Hersteller-Installer passen."
+    Write-Host ""
+
+    $configName = Read-RequiredValue -Prompt "Name der Konfiguration"
+    $actions = [System.Collections.Generic.List[object]]::new()
+
+    do {
+        Write-Host ""
+        Write-Section -Title "AKTION HINZUFUEGEN"
+        Write-MenuItem -Key "1" -Label "WinGet-Paket installieren"
+        Write-MenuItem -Key "2" -Label "EXE-Installer ausfuehren"
+        Write-MenuItem -Key "3" -Label "MSI-Installer ausfuehren"
+        Write-MenuItem -Key "4" -Label "Programm deinstallieren" -Hint "per WinGet-ID oder exaktem Programmnamen"
+        Write-MenuItem -Key "0" -Label "Builder abschliessen"
+        $typeChoice = Read-MenuChoice -Prompt "Aktion" -AllowedValues @("0", "1", "2", "3", "4")
+        if ($typeChoice -eq "0") { break }
+
+        $displayName = Read-RequiredValue -Prompt "Anzeigename der Aktion"
+        if ($typeChoice -eq "4") {
+            Write-MenuItem -Key "1" -Label "Ueber exakte WinGet-ID suchen"
+            Write-MenuItem -Key "2" -Label "Ueber exakten installierten Programmnamen suchen"
+            $matchChoice = Read-MenuChoice -Prompt "Suchmethode" -AllowedValues @("1", "2")
+            if ($matchChoice -eq "1") {
+                $uninstallId = Read-RequiredValue -Prompt "Exakte WinGet-ID"
+                $uninstallName = $null
+            }
+            else {
+                $uninstallId = $null
+                $uninstallName = Read-RequiredValue -Prompt "Exakter installierter Programmname"
+            }
+            $actions.Add([pscustomobject]@{
+                Action = "uninstall"
+                Name = $displayName
+                Type = "winget"
+                Id = $uninstallId
+                MatchName = $uninstallName
+                Source = $null
+                SourcePath = $null
+                Arguments = $null
+                CopyToConfig = $false
+            })
+        }
+        elseif ($typeChoice -eq "1") {
+            $packageId = Read-RequiredValue -Prompt "Exakte WinGet-ID, z. B. 7zip.7zip"
+            $source = (Read-Host "  WinGet-Quelle [winget]").Trim()
+            if ([string]::IsNullOrWhiteSpace($source)) { $source = "winget" }
+            $actions.Add([pscustomobject]@{
+                Action = "install"
+                Name = $displayName
+                Type = "winget"
+                Id = $packageId
+                MatchName = $null
+                Source = $source
+                SourcePath = $null
+                Arguments = $null
+                CopyToConfig = $false
+            })
+        }
+        else {
+            $installerType = if ($typeChoice -eq "2") { "exe" } else { "msi" }
+            $installerPath = Read-RequiredValue -Prompt "Vollstaendiger Pfad zum $($installerType.ToUpper())-Installer"
+            if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
+                Write-Status -Type Warning -Message "Datei wurde nicht gefunden. Das Programm wird nicht hinzugefuegt."
+                continue
+            }
+
+            $defaultArguments = if ($installerType -eq "msi") { "/qn /norestart" } else { "" }
+            $arguments = (Read-Host "  Installationsparameter [$defaultArguments]").Trim()
+            if ([string]::IsNullOrWhiteSpace($arguments)) { $arguments = $defaultArguments }
+            if ($installerType -eq "exe" -and [string]::IsNullOrWhiteSpace($arguments)) {
+                Write-Status -Type Warning -Message "Fuer einen unbeaufsichtigten Ablauf werden Silent-Parameter benoetigt."
+                $arguments = Read-RequiredValue -Prompt "Silent-Installationsparameter"
+            }
+
+            $copyAnswer = Read-Host "  Installer mit in den Config-Ordner kopieren? [J/n]"
+            $copyToConfig = $copyAnswer -notmatch '^(?i:n|nein|no)$'
+            $actions.Add([pscustomobject]@{
+                Action = "install"
+                Name = $displayName
+                Type = $installerType
+                Id = $null
+                MatchName = $null
+                Source = $null
+                SourcePath = (Resolve-Path -LiteralPath $installerPath).Path
+                Arguments = $arguments
+                CopyToConfig = $copyToConfig
+            })
+        }
+
+        Write-Status -Type Success -Message "'$displayName' wurde vorgemerkt."
+        $continueAnswer = Read-Host "  Weitere Aktion hinzufuegen? [J/n]"
+    } while ($continueAnswer -notmatch '^(?i:n|nein|no)$')
+
+    if ($actions.Count -eq 0) {
+        Write-Status -Type Warning -Message "Keine Aktionen hinzugefuegt. Es wurde keine JSON-Datei erstellt."
+        return
+    }
+
+    $restartAnswer = Read-Host "  Windows Explorer nach dem Profil automatisch neu starten? [j/N]"
+    $restartExplorer = Test-Yes $restartAnswer
+
+    $outputDirectory = Select-ConfigOutputDirectory
+    $installerDirectory = Join-Path $outputDirectory 'Installers'
+    $serializedActions = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($action in $actions) {
+        if ($action.Action -eq 'uninstall') {
+            $serializedActions.Add([ordered]@{
+                action = 'uninstall'
+                name = $action.Name
+                type = 'winget'
+                id = $action.Id
+                matchName = $action.MatchName
+            })
+            continue
+        }
+
+        if ($action.Type -eq 'winget') {
+            $serializedActions.Add([ordered]@{
+                action = 'install'
+                name = $action.Name
+                type = 'winget'
+                id = $action.Id
+                source = $action.Source
+            })
+            continue
+        }
+
+        $savedPath = $action.SourcePath
+        $hash = $null
+        if ($action.CopyToConfig) {
+            New-Item -ItemType Directory -Path $installerDirectory -Force -ErrorAction Stop | Out-Null
+            $destination = Get-UniqueInstallerDestination -Directory $installerDirectory -FileName ([IO.Path]::GetFileName($action.SourcePath))
+            Write-Host "  Kopiere Installer: $($action.Name)"
+            Copy-Item -LiteralPath $action.SourcePath -Destination $destination -ErrorAction Stop
+            $savedPath = "Installers\$([IO.Path]::GetFileName($destination))"
+            $hash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256 -ErrorAction Stop).Hash
+        }
+
+        $serializedActions.Add([ordered]@{
+            action = 'install'
+            name = $action.Name
+            type = $action.Type
+            path = $savedPath
+            arguments = $action.Arguments
+            sha256 = $hash
+            successExitCodes = @(0, 1641, 3010)
+        })
+    }
+
+    $config = [ordered]@{
+        schemaVersion = 2
+        name = $configName
+        createdAt = (Get-Date).ToString('o')
+        restartExplorer = $restartExplorer
+        actions = $serializedActions
+    }
+    $safeName = ($configName -replace '[<>:"/\\|?*]', '_').Trim().TrimEnd('.')
+    if ([string]::IsNullOrWhiteSpace($safeName)) { $safeName = 'CustomSetup' }
+    $configPath = Join-Path $outputDirectory ($safeName + '.json')
+    if (Test-Path -LiteralPath $configPath) {
+        $configPath = Join-Path $outputDirectory ("{0}-{1}.json" -f $safeName, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    }
+
+    $json = $config | ConvertTo-Json -Depth 8
+    $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($configPath, $json, $utf8WithoutBom)
+    Write-Host ""
+    Write-Status -Type Success -Message "Konfiguration gespeichert: $configPath"
+    if ($actions | Where-Object { $_.CopyToConfig }) {
+        Write-Status -Type Success -Message "Die ausgewaehlten Installer wurden portabel in den Unterordner 'Installers' kopiert."
+    }
+}
+
+function Get-AvailableCustomConfigs {
+    $directories = [System.Collections.Generic.List[string]]::new()
+    $localConfigDirectory = Join-Path $PSScriptRoot 'Configs'
+    if (Test-Path -LiteralPath $localConfigDirectory) { $directories.Add($localConfigDirectory) }
+
+    foreach ($drive in @(Get-RemovableConfigDrives)) {
+        $usbConfigDirectory = Join-Path $drive.DeviceID 'BloatRemoverConfigs'
+        if (Test-Path -LiteralPath $usbConfigDirectory) { $directories.Add($usbConfigDirectory) }
+    }
+
+    @(
+        foreach ($directory in ($directories | Sort-Object -Unique)) {
+            Get-ChildItem -LiteralPath $directory -Filter '*.json' -File -ErrorAction SilentlyContinue
+        }
+    ) | Sort-Object FullName -Unique
+}
+
+function Select-CustomConfigFile {
+    $configs = @(Get-AvailableCustomConfigs)
+    Write-Host ""
+    Write-Section -Title "KONFIGURATION WAEHLEN"
+    if ($configs.Count -gt 0) {
+        for ($index = 0; $index -lt $configs.Count; $index++) {
+            Write-MenuItem -Key ([string]($index + 1)) -Label $configs[$index].BaseName -Hint $configs[$index].DirectoryName
+        }
+    }
+    else {
+        Write-Status -Type Warning -Message "In lokalen oder USB-Config-Ordnern wurden keine JSON-Dateien gefunden."
+    }
+    Write-MenuItem -Key "M" -Label "JSON-Pfad manuell eingeben"
+    Write-MenuItem -Key "0" -Label "Abbrechen"
+
+    do {
+        $choice = (Read-Host "  Auswahl").Trim()
+        if ($choice -eq '0') { return $null }
+        if ($choice -match '^(?i:m|manuell)$') {
+            $manualPath = Read-RequiredValue -Prompt "Vollstaendiger Pfad zur JSON-Datei"
+            if (Test-Path -LiteralPath $manualPath -PathType Leaf) {
+                return (Resolve-Path -LiteralPath $manualPath).Path
+            }
+            Write-Status -Type Warning -Message "JSON-Datei wurde nicht gefunden."
+            continue
+        }
+
+        $number = 0
+        if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $configs.Count) {
+            return $configs[$number - 1].FullName
+        }
+        Write-Status -Type Warning -Message "Ungueltige Auswahl."
+    } while ($true)
+}
+
+function Invoke-CustomFileInstaller {
+    param(
+        [Parameter(Mandatory)]$Application,
+        [Parameter(Mandatory)][string]$ConfigDirectory
+    )
+
+    $installerPath = [string]$Application.path
+    if ([string]::IsNullOrWhiteSpace($installerPath)) { throw "Installer-Pfad fehlt." }
+    if (-not [IO.Path]::IsPathRooted($installerPath)) {
+        $installerPath = Join-Path $ConfigDirectory $installerPath
+    }
+    $installerPath = [IO.Path]::GetFullPath($installerPath)
+    if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
+        throw "Installer nicht gefunden: $installerPath"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$Application.sha256)) {
+        $actualHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256 -ErrorAction Stop).Hash
+        if ($actualHash -ne [string]$Application.sha256) {
+            throw "SHA-256-Pruefung fuer '$($Application.name)' ist fehlgeschlagen."
+        }
+    }
+
+    $arguments = [string]$Application.arguments
+    $type = ([string]$Application.type).ToLowerInvariant()
+    if ($type -eq 'msi') {
+        $filePath = 'msiexec.exe'
+        $argumentList = "/i `"$installerPath`" $arguments".Trim()
+    }
+    elseif ($type -eq 'exe') {
+        $filePath = $installerPath
+        $argumentList = $arguments
+    }
+    else {
+        throw "Nicht unterstuetzter Installer-Typ '$type'."
+    }
+
+    $processArguments = @{ FilePath = $filePath; Wait = $true; PassThru = $true; ErrorAction = 'Stop' }
+    if (-not [string]::IsNullOrWhiteSpace($argumentList)) { $processArguments.ArgumentList = $argumentList }
+    $process = Start-Process @processArguments
+
+    $successExitCodes = @($Application.successExitCodes | ForEach-Object { [int]$_ })
+    if ($successExitCodes.Count -eq 0) { $successExitCodes = @(0, 1641, 3010) }
+    if ($process.ExitCode -notin $successExitCodes) {
+        throw "Installer endete mit Exitcode $($process.ExitCode)."
+    }
+}
+
+function Install-CustomConfig {
+    param([string]$Path)
+
+    $configPath = $Path
+    if ([string]::IsNullOrWhiteSpace($configPath)) {
+        $configPath = Select-CustomConfigFile
+    }
+    if ([string]::IsNullOrWhiteSpace($configPath)) { return $false }
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        Write-Status -Type Error -Message "Konfiguration wurde nicht gefunden: $configPath"
+        return $false
+    }
+    $configPath = (Resolve-Path -LiteralPath $configPath).Path
+
+    try {
+        $config = Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        Write-Status -Type Error -Message "Konfiguration konnte nicht gelesen werden: $($_.Exception.Message)"
+        return $false
+    }
+    $script:CustomConfigExecuted = $true
+
+    $actions = @($config.actions)
+    if ($actions.Count -eq 0 -and @($config.applications).Count -gt 0) {
+        # Rueckwaertskompatibilitaet mit den zuerst erzeugten Schema-v1-Dateien.
+        $actions = @($config.applications | ForEach-Object {
+            $_ | Add-Member -NotePropertyName action -NotePropertyValue 'install' -PassThru -Force
+        })
+    }
+    if ($actions.Count -eq 0) {
+        Write-Status -Type Warning -Message "Die Konfiguration enthaelt keine Aktionen."
+        return $false
+    }
+
+    Write-Host ""
+    Write-Status -Type Info -Message "Profil: $($config.name)"
+    Write-Status -Type Info -Message "$($actions.Count) Aktion(en) werden jetzt ohne weitere Rueckfragen ausgefuehrt."
+
+    $configDirectory = Split-Path -Parent $configPath
+    $failedActions = 0
+    foreach ($action in $actions) {
+        Write-Host ""
+        $actionMode = ([string]$action.action).ToLowerInvariant()
+        if ([string]::IsNullOrWhiteSpace($actionMode)) { $actionMode = 'install' }
+        $verb = if ($actionMode -eq 'uninstall') { 'Deinstalliere' } else { 'Installiere' }
+        Write-Status -Type Info -Message "$verb`: $($action.name)"
+        try {
+            if ($actionMode -notin @('install', 'uninstall')) {
+                throw "Unbekannte Aktion '$actionMode'. Erlaubt sind install und uninstall."
+            }
+            if ($actionMode -eq 'uninstall') {
+                Uninstall-WingetPackage -Id ([string]$action.id) -Name ([string]$action.matchName)
+            }
+            else {
+                $type = ([string]$action.type).ToLowerInvariant()
+                if ($type -eq 'winget') {
+                    $source = if ($action.source) { [string]$action.source } else { 'winget' }
+                    Install-WingetPackage -Id ([string]$action.id) -Name ([string]$action.matchName) -Source $source -ThrowOnError
+                }
+                else {
+                    Invoke-CustomFileInstaller -Application $action -ConfigDirectory $configDirectory
+                }
+            }
+            Write-Status -Type Success -Message "'$($action.name)' wurde verarbeitet."
+        }
+        catch {
+            $failedActions++
+            Write-Status -Type Error -Message "'$($action.name)' ist fehlgeschlagen: $($_.Exception.Message)"
+        }
+    }
+
+    if ($config.restartExplorer -eq $true) {
+        Restart-WindowsExplorer
+    }
+
+    if ($failedActions -gt 0) {
+        Write-Status -Type Warning -Message "$failedActions Aktion(en) sind fehlgeschlagen; alle uebrigen Aktionen wurden trotzdem ausgefuehrt."
+        return $false
+    }
+    Write-Status -Type Success -Message "Custom-Konfiguration wurde vollstaendig ausgefuehrt."
+    return $true
 }
 
 function Install-Updates {
@@ -489,7 +965,7 @@ function Read-MultiMenuChoice {
 
     do {
         Write-Host ""
-        $rawChoice = (Read-Host "  $Prompt").Trim()
+        $rawChoice = (Read-Host "  $Prompt").Trim().ToLowerInvariant()
         if ($rawChoice -match '^(?i:a|all|alle)$') {
             if ($AllValues.Count -gt 0) { return $AllValues }
         }
@@ -507,6 +983,10 @@ function Read-MultiMenuChoice {
         }
         if ($values.Count -gt 1 -and $values -contains '0') {
             Write-Status -Type Warning -Message "'0' kann nicht mit anderen Aktionen kombiniert werden."
+            continue
+        }
+        if ($values.Count -gt 1 -and ($values -contains 'b' -or $values -contains 'c')) {
+            Write-Status -Type Warning -Message "Builder und Custom-Konfiguration bitte jeweils einzeln auswaehlen."
             continue
         }
 
@@ -890,12 +1370,23 @@ function Show-MainMenu {
         Write-MenuItem -Key "6" -Label ".NET Framework 3.5 installieren"
         Write-MenuItem -Key "7" -Label "WinGet-Paketliste anzeigen"
         Write-MenuItem -Key "A" -Label "Alles ausfuehren" -Hint "Menuepunkte 1 bis 7 nacheinander"
+        Write-MenuItem -Key "C" -Label "Custom-JSON ausfuehren" -Hint "danach vollstaendig ohne Rueckfragen"
+        Write-MenuItem -Key "B" -Label "JSON Config Builder" -Hint "Profil lokal oder auf USB erstellen"
         Write-MenuItem -Key "0" -Label "Beenden"
         Write-Host ""
         Write-Status -Type Info -Message "Mehrfachauswahl mit Komma: z. B. 1,2,4,6"
 
-        $choices = @(Read-MultiMenuChoice -Prompt "Auswahl" -AllowedValues @("0", "1", "2", "3", "4", "5", "6", "7") -AllValues @("1", "2", "3", "4", "5", "6", "7"))
+        $choices = @(Read-MultiMenuChoice -Prompt "Auswahl" -AllowedValues @("0", "1", "2", "3", "4", "5", "6", "7", "c", "b") -AllValues @("1", "2", "3", "4", "5", "6", "7"))
         if ($choices -contains "0") { break }
+
+        if ($choices -contains "b") {
+            Invoke-MenuAction -Title "JSON CONFIG BUILDER" -Action { New-CustomInstallConfig }
+            continue
+        }
+        if ($choices -contains "c") {
+            Install-CustomConfig | Out-Null
+            return
+        }
 
         $actionLabels = @{
             "1" = "HP-Bloatware entfernen"
@@ -950,12 +1441,20 @@ Write-Banner
 if (-not (Test-IsAdministrator)) {
     Write-Status -Type Error -Message "BloatRemover muss als Administrator gestartet werden."
     Write-Status -Type Info -Message "PowerShell per Rechtsklick als Administrator oeffnen und das Skript erneut starten."
-    Wait-ForUser
+    if ([string]::IsNullOrWhiteSpace($ConfigPath)) { Wait-ForUser }
     exit 1
 }
 
+if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
+    Write-Banner
+    Write-Section -Title "UNBEAUFSICHTIGTE JSON-KONFIGURATION"
+    $configSucceeded = Install-CustomConfig -Path $ConfigPath
+    if (-not $configSucceeded) { exit 2 }
+    exit 0
+}
+
 Show-MainMenu
-Write-Banner
+if (-not $script:CustomConfigExecuted) { Write-Banner }
 Write-Status -Type Success -Message "BloatRemover wurde beendet."
 
 
