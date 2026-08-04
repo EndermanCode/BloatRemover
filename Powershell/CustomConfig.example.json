@@ -1,8 +1,9 @@
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "name": "Beispiel-SAP-Arbeitsplatz",
   "createdAt": "2026-08-04T00:00:00.0000000+02:00",
   "startupMode": "prompt",
+  "continueToMainMenuAfterStartup": false,
   "skipIfAlreadyApplied": true,
   "restartExplorer": false,
   "energy": {

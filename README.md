@@ -65,6 +65,15 @@ legt das Verhalten eines gefundenen Profils fest: `prompt` fragt vor der Ausfueh
 verwenden weiterhin den sicheren Standard `prompt`. Sind mehrere Profile explizit
 auf `automatic` gesetzt, werden sie der Reihe nach ausgefuehrt.
 
+Mit `continueToMainMenuAfterStartup: true` wechselt das Skript nach einer beim
+normalen Skriptstart ausgefuehrten Config ins Hauptmenue, auch wenn einzelne
+Config-Aktionen fehlgeschlagen sind. Bei `false` beendet sich das Skript wie bisher
+direkt nach der Config. Der Builder fragt diese Option beim Erstellen ab; im Editor
+kann sie jederzeit umgeschaltet werden. Werden mehrere automatische Configs gefunden,
+reicht `true` in einer davon, damit nach allen Configs das Hauptmenue erscheint.
+Ein expliziter Start mit `-ConfigPath` bleibt immer vollstaendig unbeaufsichtigt und
+beendet das Skript anschließend ohne Hauptmenue.
+
 Profile koennen WinGet-, EXE- und MSI-Installationen sowie Deinstallationen per
 exakter WinGet-ID, installiertem Programmnamen oder Appx/MSIX-Paketnamen enthalten. Store-Apps
 werden im Builder und Editor direkt aus einer Checkliste der auf dem PC installierten,

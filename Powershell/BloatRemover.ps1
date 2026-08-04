@@ -51,7 +51,7 @@ $pathStartmenu = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\"
 $ErrorActionPreference = 'Continue'
 $script:CustomConfigExecuted = $false
 $script:LastCustomConfigSucceeded = $false
-$CurrentConfigSchemaVersion = 4
+$CurrentConfigSchemaVersion = 5
 $ScriptDirectory = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) { $PSScriptRoot } else { (Get-Location).Path }
 
 function Test-Yes {
@@ -951,6 +951,18 @@ function Get-CustomConfigFileStartupMode {
     }
 }
 
+function Get-CustomConfigContinueToMainMenu {
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        $config = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        return $config.continueToMainMenuAfterStartup -eq $true
+    }
+    catch {
+        return $false
+    }
+}
+
 function New-CustomInstallConfig {
     Write-Banner
     Write-Section -Title "JSON CONFIG BUILDER"
@@ -961,6 +973,8 @@ function New-CustomInstallConfig {
 
     $configName = Read-RequiredValue -Prompt "Name der Konfiguration"
     $startupMode = Read-CustomConfigStartupMode
+    $continueAnswer = Read-Host "  Nach einer beim Skriptstart ausgefuehrten Config ins Hauptmenue wechseln? [j/N]"
+    $continueToMainMenuAfterStartup = Test-Yes $continueAnswer
     $skipAnswer = Read-Host "  Vor jeder Aktion pruefen und bereits erledigte Aktionen ueberspringen? [J/n]"
     $skipIfAlreadyApplied = $skipAnswer -notmatch '^(?i:n|nein|no)$'
     $actions = [System.Collections.Generic.List[object]]::new()
@@ -1272,6 +1286,7 @@ function New-CustomInstallConfig {
         name = $configName
         createdAt = (Get-Date).ToString('o')
         startupMode = $startupMode
+        continueToMainMenuAfterStartup = $continueToMainMenuAfterStartup
         skipIfAlreadyApplied = $skipIfAlreadyApplied
         restartExplorer = $restartExplorer
         energy = $energy
@@ -1383,6 +1398,7 @@ function Convert-CustomConfigToCurrentSchema {
 
     $Config | Add-Member -NotePropertyName schemaVersion -NotePropertyValue $CurrentConfigSchemaVersion -Force
     $Config | Add-Member -NotePropertyName startupMode -NotePropertyValue (Get-NormalizedStartupMode -Value ([string]$Config.startupMode)) -Force
+    $Config | Add-Member -NotePropertyName continueToMainMenuAfterStartup -NotePropertyValue ($Config.continueToMainMenuAfterStartup -eq $true) -Force
     $Config | Add-Member -NotePropertyName skipIfAlreadyApplied -NotePropertyValue ($Config.skipIfAlreadyApplied -eq $true) -Force
     if (-not ($Config.PSObject.Properties.Name -contains 'restartExplorer')) {
         $Config | Add-Member -NotePropertyName restartExplorer -NotePropertyValue $false
@@ -1586,7 +1602,7 @@ function Select-CustomConfigFile {
 function Invoke-StartupConfigCheck {
     $configs = @(Get-AvailableCustomConfigs)
     if ($configs.Count -eq 0) {
-        return [pscustomobject]@{ Executed = $false; Succeeded = $true }
+        return [pscustomobject]@{ Executed = $false; Succeeded = $true; ContinueToMainMenu = $false }
     }
 
     $automaticConfigs = @($configs | Where-Object {
@@ -1599,12 +1615,14 @@ function Invoke-StartupConfigCheck {
         Write-Status -Type Info -Message "$($automaticConfigs.Count) Config(s) mit startupMode=automatic werden ohne Rueckfrage ausgefuehrt."
 
         $allSucceeded = $true
+        $continueToMainMenu = $false
         foreach ($automaticConfig in $automaticConfigs) {
             Write-Status -Type Info -Message "Starte automatisch: $($automaticConfig.BaseName)  [$($automaticConfig.DirectoryName)]"
             $null = Install-CustomConfig -Path $automaticConfig.FullName
             if (-not $script:LastCustomConfigSucceeded) { $allSucceeded = $false }
+            if (Get-CustomConfigContinueToMainMenu -Path $automaticConfig.FullName) { $continueToMainMenu = $true }
         }
-        return [pscustomobject]@{ Executed = $true; Succeeded = $allSucceeded }
+        return [pscustomobject]@{ Executed = $true; Succeeded = $allSucceeded; ContinueToMainMenu = $continueToMainMenu }
     }
 
     Write-Banner
@@ -1614,7 +1632,7 @@ function Invoke-StartupConfigCheck {
         Write-Status -Type Info -Message "Gefunden: $($configs[0].BaseName)  [$($configs[0].DirectoryName)]"
         $answer = Read-Host "  Diese Konfiguration jetzt unbeaufsichtigt ausfuehren? [j/N]"
         if (-not (Test-Yes $answer)) {
-            return [pscustomobject]@{ Executed = $false; Succeeded = $true }
+            return [pscustomobject]@{ Executed = $false; Succeeded = $true; ContinueToMainMenu = $false }
         }
         $configPath = $configs[0].FullName
     }
@@ -1622,17 +1640,18 @@ function Invoke-StartupConfigCheck {
         Write-Status -Type Info -Message "$($configs.Count) gueltige Konfigurationen wurden gefunden."
         $answer = Read-Host "  Eine Konfiguration jetzt unbeaufsichtigt ausfuehren? [j/N]"
         if (-not (Test-Yes $answer)) {
-            return [pscustomobject]@{ Executed = $false; Succeeded = $true }
+            return [pscustomobject]@{ Executed = $false; Succeeded = $true; ContinueToMainMenu = $false }
         }
         $configPath = Select-CustomConfigFile -Configs $configs
         if ([string]::IsNullOrWhiteSpace($configPath)) {
-            return [pscustomobject]@{ Executed = $false; Succeeded = $true }
+            return [pscustomobject]@{ Executed = $false; Succeeded = $true; ContinueToMainMenu = $false }
         }
     }
 
     Write-Status -Type Info -Message "Starte Konfiguration: $([IO.Path]::GetFileName($configPath))"
     $null = Install-CustomConfig -Path $configPath
-    return [pscustomobject]@{ Executed = $true; Succeeded = $script:LastCustomConfigSucceeded }
+    $continueToMainMenu = Get-CustomConfigContinueToMainMenu -Path $configPath
+    return [pscustomobject]@{ Executed = $true; Succeeded = $script:LastCustomConfigSucceeded; ContinueToMainMenu = $continueToMainMenu }
 }
 
 function Get-CustomActionSummary {
@@ -1661,6 +1680,7 @@ function Show-CustomConfigEditorState {
     Write-Status -Type Info -Message "Schema: v$schemaVersion $(if ($schemaVersion -lt $CurrentConfigSchemaVersion) { '(Upgrade verfuegbar)' } else { '(aktuell)' })"
     $startupMode = Get-NormalizedStartupMode -Value ([string]$Config.startupMode)
     Write-Status -Type Info -Message "Startverhalten: $(if ($startupMode -eq 'automatic') { 'Sofort automatisch' } else { 'Beim Fund nachfragen' })"
+    Write-Status -Type Info -Message "Nach Startup-Config ins Hauptmenue: $(if ($Config.continueToMainMenuAfterStartup -eq $true) { 'Ja' } else { 'Nein' })"
     Write-Status -Type Info -Message "Erledigte Aktionen ueberspringen: $(if ($Config.skipIfAlreadyApplied -eq $true) { 'Ja' } else { 'Nein' })"
     Write-Status -Type Info -Message "Explorer-Neustart: $(if ($Config.restartExplorer -eq $true) { 'Ja' } else { 'Nein' })"
     Write-Status -Type Info -Message "Energie: $(Get-CustomConfigEnergySummary -Energy $Config.energy)"
@@ -1872,6 +1892,7 @@ function Save-CustomConfigObject {
 
     $Config | Add-Member -NotePropertyName schemaVersion -NotePropertyValue $CurrentConfigSchemaVersion -Force
     $Config | Add-Member -NotePropertyName startupMode -NotePropertyValue (Get-NormalizedStartupMode -Value ([string]$Config.startupMode)) -Force
+    $Config | Add-Member -NotePropertyName continueToMainMenuAfterStartup -NotePropertyValue ($Config.continueToMainMenuAfterStartup -eq $true) -Force
     $Config | Add-Member -NotePropertyName skipIfAlreadyApplied -NotePropertyValue ($Config.skipIfAlreadyApplied -eq $true) -Force
     $Config | Add-Member -NotePropertyName modifiedAt -NotePropertyValue ((Get-Date).ToString('o')) -Force
     $Config | Add-Member -NotePropertyName actions -NotePropertyValue @($Actions) -Force
@@ -1923,6 +1944,7 @@ function Edit-CustomConfig {
         Write-MenuItem -Key "13" -Label "Startverhalten aendern" -Hint "automatisch oder nachfragen"
         Write-MenuItem -Key "14" -Label "HP-Debloat hinzufuegen" -Hint "HP Support Assistant bleibt erhalten"
         Write-MenuItem -Key "15" -Label "Erledigte Aktionen ueberspringen umschalten" -Hint "Installationen, Einstellungen und Deinstallationen pruefen"
+        Write-MenuItem -Key "16" -Label "Nach Startup-Config ins Hauptmenue umschalten"
         Write-MenuItem -Key "S" -Label "Speichern und Editor schliessen"
         Write-MenuItem -Key "0" -Label "Ohne Speichern schliessen"
         $choice = (Read-Host "  Auswahl").Trim().ToLowerInvariant()
@@ -2123,6 +2145,9 @@ function Edit-CustomConfig {
             }
             "15" {
                 $config | Add-Member -NotePropertyName skipIfAlreadyApplied -NotePropertyValue (-not ($config.skipIfAlreadyApplied -eq $true)) -Force
+            }
+            "16" {
+                $config | Add-Member -NotePropertyName continueToMainMenuAfterStartup -NotePropertyValue (-not ($config.continueToMainMenuAfterStartup -eq $true)) -Force
             }
             "s" {
                 if ($actions.Count -eq 0 -and $null -eq $config.energy) {
@@ -3484,9 +3509,19 @@ if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
 }
 
 $startupConfigResult = @(Invoke-StartupConfigCheck) | Select-Object -Last 1
-if ($startupConfigResult.Executed) {
+if ($startupConfigResult.Executed -and -not $startupConfigResult.ContinueToMainMenu) {
     if (-not $startupConfigResult.Succeeded) { exit 2 }
     exit 0
+}
+
+if ($startupConfigResult.Executed -and $startupConfigResult.ContinueToMainMenu) {
+    Write-Host ""
+    if ($startupConfigResult.Succeeded) {
+        Write-Status -Type Success -Message "Startup-Config abgeschlossen. Das Hauptmenue wird geoeffnet."
+    }
+    else {
+        Write-Status -Type Warning -Message "Die Startup-Config wurde mit Fehlern beendet. Das Hauptmenue wird trotzdem geoeffnet."
+    }
 }
 
 Show-MainMenu
