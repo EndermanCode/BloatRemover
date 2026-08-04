@@ -53,7 +53,12 @@ ungueltige und `*.example.json`-Dateien werden ignoriert. Bei einem Treffer frag
 das Skript sofort, ob das Profil unbeaufsichtigt ausgefuehrt werden soll.
 
 Profile koennen WinGet-, EXE- und MSI-Installationen sowie Deinstallationen per
-exakter WinGet-ID oder installiertem Programmnamen enthalten. EXE/MSI-Dateien
+exakter WinGet-ID, installiertem Programmnamen oder Appx/MSIX-Paketnamen enthalten. Store-Apps
+werden im Builder und Editor direkt aus einer Checkliste der auf dem PC installierten,
+entfernbaren Apps gewaehlt. Die Auswahl entfernt auch ein passendes provisioniertes
+Paket, damit die App nicht bei einem neuen Benutzer erneut auftaucht. Windows-Kernpakete,
+Frameworks, Microsoft Store, App Installer und HP Support Assistant werden nicht angeboten.
+EXE/MSI-Dateien
 koennen in den portablen Unterordner `Installers` kopiert werden. Dabei werden
 relative Pfade und eine SHA-256-Pruefsumme in der JSON-Datei gespeichert.
 WinGet-Pakete werden im Builder aus einer fertigen Checkliste gewaehlt: mit den

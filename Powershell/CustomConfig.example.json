@@ -19,6 +19,13 @@
       "matchName": "Alte Beispielsoftware"
     },
     {
+      "action": "uninstall",
+      "name": "Microsoft Bing News",
+      "type": "appx",
+      "packageName": "Microsoft.BingNews",
+      "packageFamilyName": "Microsoft.BingNews_8wekyb3d8bbwe"
+    },
+    {
       "action": "install",
       "name": "7-Zip",
       "type": "winget",

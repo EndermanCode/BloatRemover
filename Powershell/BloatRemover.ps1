@@ -50,6 +50,7 @@ $pathTaskbar = "$env:USERPROFILE\AppData\Roaming\Microsoft\Internet Explorer\Qui
 $pathStartmenu = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\"
 $ErrorActionPreference = 'Continue'
 $script:CustomConfigExecuted = $false
+$script:LastCustomConfigSucceeded = $false
 $ScriptDirectory = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) { $PSScriptRoot } else { (Get-Location).Path }
 
 function Test-Yes {
@@ -57,7 +58,7 @@ function Test-Yes {
     if ([string]::IsNullOrWhiteSpace($Value)) {
         return $false
     }
-    return $Value.Trim() -match '^(?i:y|yes|ja)$'
+    return $Value.Trim() -match '^(?i:j|ja|y|yes)$'
 }
 
 function Install-WingetPackage {
@@ -180,7 +181,7 @@ function Select-WingetPackagesFallback {
     }
 
     do {
-        $rawSelection = (Read-Host "  Pakete (z. B. 1,3,5 oder alle; 0 = Abbrechen)").Trim()
+        $rawSelection = (Read-Host "  Eintraege (z. B. 1,3,5 oder alle; 0 = Abbrechen)").Trim()
         if ($rawSelection -eq '0') { return @() }
         if ($rawSelection -match '^(?i:a|all|alle)$') { return @($Packages) }
 
@@ -196,7 +197,7 @@ function Select-WingetPackagesFallback {
             if (-not $selected.Contains($package)) { $selected.Add($package) }
         }
         if (-not $invalid -and $selected.Count -gt 0) { return @($selected) }
-        Write-Status -Type Warning -Message "Ungueltige Paketauswahl."
+        Write-Status -Type Warning -Message "Ungueltige Auswahl."
     } while ($true)
 }
 
@@ -267,6 +268,170 @@ function Select-WingetPackages {
     }
     finally {
         try { [Console]::CursorVisible = $originalCursorVisible } catch {}
+    }
+}
+
+function Get-RemovableStoreApps {
+    $protectedPackageNames = @(
+        '^Microsoft\.WindowsStore$'
+        '^Microsoft\.StorePurchaseApp$'
+        '^Microsoft\.DesktopAppInstaller$'
+        '^Microsoft\.SecHealthUI$'
+        '^Microsoft\.Windows\.ShellExperienceHost$'
+        '^Microsoft\.Windows\.StartMenuExperienceHost$'
+        '^Microsoft\.Windows\.Search$'
+        '^Microsoft\.AAD\.BrokerPlugin$'
+        '^Microsoft\.AccountsControl$'
+        '^Microsoft\.LockApp$'
+        '^Microsoft\.CloudExperienceHost$'
+        '^MicrosoftWindows\.Client\.'
+        '^MicrosoftWindows\.UndockedDevKit$'
+        '^Microsoft\.Win32WebViewHost$'
+        '^windows\.immersivecontrolpanel$'
+        '^Microsoft\.WindowsAppRuntime\.'
+        '^Microsoft\.VCLibs\.'
+        '^Microsoft\.NET\.Native\.'
+        '^Microsoft\.UI\.Xaml\.'
+    )
+
+    $startAppNames = @{}
+    foreach ($startApp in @(Get-StartApps -ErrorAction SilentlyContinue)) {
+        if ($startApp.AppID -match '^([^!]+)!' -and -not $startAppNames.ContainsKey($Matches[1])) {
+            $startAppNames[$Matches[1]] = [string]$startApp.Name
+        }
+    }
+
+    $packages = @(
+        Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue |
+            Where-Object {
+                $package = $_
+                $isProtectedName = @($protectedPackageNames | Where-Object { $package.Name -match $_ }).Count -gt 0
+                -not $isProtectedName -and
+                -not (Test-HPProtectedComponent -Name "$($package.Name) $($package.PackageFamilyName)") -and
+                $package.IsFramework -ne $true -and
+                $package.IsResourcePackage -ne $true -and
+                $package.NonRemovable -ne $true
+            } |
+            Group-Object Name, PackageFamilyName |
+            ForEach-Object { $_.Group | Select-Object -First 1 }
+    )
+
+    @(
+        foreach ($package in $packages) {
+            $friendlyName = $startAppNames[[string]$package.PackageFamilyName]
+            if ([string]::IsNullOrWhiteSpace($friendlyName) -or $friendlyName -match '^ms-resource:') {
+                $friendlyName = [string]$package.Name
+            }
+            [pscustomobject]@{
+                DisplayName = $friendlyName
+                Id = [string]$package.Name
+                Name = $null
+                Source = 'appx'
+                PackageName = [string]$package.Name
+                PackageFamilyName = [string]$package.PackageFamilyName
+                PublisherDisplayName = [string]$package.PublisherDisplayName
+            }
+        }
+    ) | Sort-Object DisplayName
+}
+
+function Add-StoreAppUninstallSelections {
+    param([Parameter(Mandatory)]$Actions)
+
+    Write-Host ""
+    Write-Status -Type Info -Message "Installierte Store-Apps werden ermittelt..."
+    $storeApps = @(Get-RemovableStoreApps)
+    if ($storeApps.Count -eq 0) {
+        Write-Status -Type Warning -Message "Es wurden keine auswaehlbaren Store-Apps gefunden."
+        return
+    }
+
+    $selectedApps = @(Select-WingetPackages -Packages $storeApps)
+    if ($selectedApps.Count -eq 0) {
+        Write-Status -Type Info -Message "Keine Store-Apps ausgewaehlt."
+        return
+    }
+
+    $addedCount = 0
+    foreach ($app in $selectedApps) {
+        $duplicate = @($Actions | Where-Object {
+            $_.action -eq 'uninstall' -and $_.type -eq 'appx' -and
+            $_.packageName -eq $app.PackageName
+        }).Count -gt 0
+        if ($duplicate) { continue }
+
+        $Actions.Add([pscustomobject][ordered]@{
+            action = 'uninstall'
+            name = $app.DisplayName
+            type = 'appx'
+            packageName = $app.PackageName
+            packageFamilyName = $app.PackageFamilyName
+        })
+        $addedCount++
+    }
+    Write-Status -Type Success -Message "$addedCount Store-App(s) wurden zur Deinstallation vorgemerkt."
+}
+
+function Uninstall-StoreAppPackage {
+    param(
+        [string]$PackageName,
+        [string]$PackageFamilyName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PackageName) -and [string]::IsNullOrWhiteSpace($PackageFamilyName)) {
+        throw "Fuer die Store-App fehlt packageName oder packageFamilyName."
+    }
+    if (Test-HPProtectedComponent -Name "$PackageName $PackageFamilyName") {
+        throw "HP Support Assistant und seine Support-Komponenten duerfen nicht entfernt werden."
+    }
+
+    $installedPackages = @(
+        Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue |
+            Where-Object {
+                ($PackageName -and $_.Name -eq $PackageName) -or
+                ($PackageFamilyName -and $_.PackageFamilyName -eq $PackageFamilyName)
+            } |
+            Sort-Object PackageFullName -Unique
+    )
+    $provisionedPackages = @(
+        Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+            Where-Object {
+                ($PackageName -and $_.DisplayName -eq $PackageName) -or
+                ($PackageFamilyName -and $_.PackageName -like "$PackageFamilyName*")
+            } |
+            Sort-Object PackageName -Unique
+    )
+
+    if ($installedPackages.Count -eq 0 -and $provisionedPackages.Count -eq 0) {
+        Write-Status -Type Info -Message "Store-App '$PackageName' ist bereits nicht mehr installiert."
+        return
+    }
+
+    $errors = [System.Collections.Generic.List[string]]::new()
+    foreach ($package in $installedPackages) {
+        try {
+            Remove-AppxPackage -Package $package.PackageFullName -AllUsers -ErrorAction Stop | Out-Null
+        }
+        catch {
+            try {
+                Remove-AppxPackage -Package $package.PackageFullName -ErrorAction Stop | Out-Null
+            }
+            catch {
+                $errors.Add("Installiertes Paket '$($package.PackageFullName)': $($_.Exception.Message)")
+            }
+        }
+    }
+    foreach ($package in $provisionedPackages) {
+        try {
+            Remove-AppxProvisionedPackage -Online -PackageName $package.PackageName -AllUsers -ErrorAction Stop | Out-Null
+        }
+        catch {
+            $errors.Add("Provisioniertes Paket '$($package.PackageName)': $($_.Exception.Message)")
+        }
+    }
+
+    if ($errors.Count -gt 0) {
+        throw ($errors -join ' | ')
     }
 }
 
@@ -444,7 +609,7 @@ function New-CustomInstallConfig {
     Write-Banner
     Write-Section -Title "JSON CONFIG BUILDER"
     Write-Host ""
-    Write-Status -Type Info -Message "Unterstuetzt werden WinGet-Pakete sowie lokale oder freigegebene EXE-/MSI-Installer."
+    Write-Status -Type Info -Message "Unterstuetzt werden WinGet-Pakete, Store-App-Deinstallationen sowie lokale oder freigegebene EXE-/MSI-Installer."
     Write-Status -Type Info -Message "EXE-Parameter muessen zum jeweiligen Hersteller-Installer passen."
     Write-Host ""
 
@@ -458,8 +623,9 @@ function New-CustomInstallConfig {
         Write-MenuItem -Key "2" -Label "EXE-Installer ausfuehren"
         Write-MenuItem -Key "3" -Label "MSI-Installer ausfuehren"
         Write-MenuItem -Key "4" -Label "Programm deinstallieren" -Hint "per WinGet-ID oder exaktem Programmnamen"
+        Write-MenuItem -Key "5" -Label "Store-Apps deinstallieren" -Hint "installierte Apps per Checkliste auswaehlen"
         Write-MenuItem -Key "0" -Label "Builder abschliessen"
-        $typeChoice = Read-MenuChoice -Prompt "Aktion" -AllowedValues @("0", "1", "2", "3", "4")
+        $typeChoice = Read-MenuChoice -Prompt "Aktion" -AllowedValues @("0", "1", "2", "3", "4", "5")
         if ($typeChoice -eq "0") { break }
 
         if ($typeChoice -eq "1") {
@@ -491,6 +657,13 @@ function New-CustomInstallConfig {
                 $addedCount++
             }
             Write-Status -Type Success -Message "$addedCount WinGet-Paket(e) wurden vorgemerkt."
+            $continueAnswer = Read-Host "  Weitere Aktion hinzufuegen? [J/n]"
+            if ($continueAnswer -match '^(?i:n|nein|no)$') { break }
+            continue
+        }
+
+        if ($typeChoice -eq "5") {
+            Add-StoreAppUninstallSelections -Actions $actions
             $continueAnswer = Read-Host "  Weitere Aktion hinzufuegen? [J/n]"
             if ($continueAnswer -match '^(?i:n|nein|no)$') { break }
             continue
@@ -576,13 +749,24 @@ function New-CustomInstallConfig {
 
     foreach ($action in $actions) {
         if ($action.Action -eq 'uninstall') {
-            $serializedActions.Add([ordered]@{
-                action = 'uninstall'
-                name = $action.Name
-                type = 'winget'
-                id = $action.Id
-                matchName = $action.MatchName
-            })
+            if ($action.Type -eq 'appx') {
+                $serializedActions.Add([ordered]@{
+                    action = 'uninstall'
+                    name = $action.Name
+                    type = 'appx'
+                    packageName = $action.PackageName
+                    packageFamilyName = $action.PackageFamilyName
+                })
+            }
+            else {
+                $serializedActions.Add([ordered]@{
+                    action = 'uninstall'
+                    name = $action.Name
+                    type = 'winget'
+                    id = $action.Id
+                    matchName = $action.MatchName
+                })
+            }
             continue
         }
 
@@ -754,8 +938,9 @@ function Invoke-StartupConfigCheck {
         }
     }
 
-    $succeeded = Install-CustomConfig -Path $configPath
-    return [pscustomobject]@{ Executed = $true; Succeeded = [bool]$succeeded }
+    Write-Status -Type Info -Message "Starte Konfiguration: $([IO.Path]::GetFileName($configPath))"
+    $null = Install-CustomConfig -Path $configPath
+    return [pscustomobject]@{ Executed = $true; Succeeded = $script:LastCustomConfigSucceeded }
 }
 
 function Get-CustomActionSummary {
@@ -763,7 +948,7 @@ function Get-CustomActionSummary {
 
     $mode = if (([string]$Action.action).ToLowerInvariant() -eq 'uninstall') { 'Deinstallieren' } else { 'Installieren' }
     $type = ([string]$Action.type).ToUpperInvariant()
-    $target = if ($Action.id) { $Action.id } elseif ($Action.matchName) { $Action.matchName } elseif ($Action.path) { $Action.path } else { '-' }
+    $target = if ($Action.id) { $Action.id } elseif ($Action.matchName) { $Action.matchName } elseif ($Action.packageName) { $Action.packageName } elseif ($Action.path) { $Action.path } else { '-' }
     return "$mode | $type | $target"
 }
 
@@ -859,11 +1044,12 @@ function Edit-CustomConfig {
         Write-MenuItem -Key "2" -Label "Explorer-Neustart umschalten"
         Write-MenuItem -Key "3" -Label "Energieeinstellungen bearbeiten"
         Write-MenuItem -Key "4" -Label "WinGet-Pakete hinzufuegen"
-        Write-MenuItem -Key "5" -Label "Deinstallation hinzufuegen"
-        Write-MenuItem -Key "6" -Label "EXE/MSI-Installer hinzufuegen"
-        Write-MenuItem -Key "7" -Label "Aktion bearbeiten"
-        Write-MenuItem -Key "8" -Label "Aktion entfernen"
-        Write-MenuItem -Key "9" -Label "Aktionsreihenfolge aendern"
+        Write-MenuItem -Key "5" -Label "Desktop-Programm deinstallieren" -Hint "WinGet"
+        Write-MenuItem -Key "6" -Label "Store-Apps deinstallieren" -Hint "installierte Apps per Checkliste"
+        Write-MenuItem -Key "7" -Label "EXE/MSI-Installer hinzufuegen"
+        Write-MenuItem -Key "8" -Label "Aktion bearbeiten"
+        Write-MenuItem -Key "9" -Label "Aktion entfernen"
+        Write-MenuItem -Key "10" -Label "Aktionsreihenfolge aendern"
         Write-MenuItem -Key "S" -Label "Speichern und Editor schliessen"
         Write-MenuItem -Key "0" -Label "Ohne Speichern schliessen"
         $choice = (Read-Host "  Auswahl").Trim().ToLowerInvariant()
@@ -909,6 +1095,9 @@ function Edit-CustomConfig {
                 })
             }
             "6" {
+                Add-StoreAppUninstallSelections -Actions $actions
+            }
+            "7" {
                 $installerChoice = Read-MenuChoice -Prompt "1 = EXE, 2 = MSI" -AllowedValues @("1", "2")
                 $type = if ($installerChoice -eq "1") { 'exe' } else { 'msi' }
                 $name = Read-RequiredValue -Prompt "Anzeigename"
@@ -938,14 +1127,17 @@ function Edit-CustomConfig {
                     arguments = $arguments; sha256 = $hash; successExitCodes = @(0, 1641, 3010)
                 })
             }
-            "7" {
+            "8" {
                 $index = Select-CustomActionIndex -Actions @($actions) -Prompt "Aktion bearbeiten"
                 if ($index -ge 0) {
                     $action = $actions[$index]
                     $newName = (Read-Host "  Anzeigename [$($action.name)]").Trim()
                     if ($newName) { $action | Add-Member -NotePropertyName name -NotePropertyValue $newName -Force }
                     if (([string]$action.action).ToLowerInvariant() -eq 'uninstall') {
-                        if ($action.id) {
+                        if (([string]$action.type).ToLowerInvariant() -eq 'appx') {
+                            Write-Status -Type Info -Message "Store-App-Kennung: $($action.packageName) (wird ueber die Checkliste festgelegt)"
+                        }
+                        elseif ($action.id) {
                             $newId = (Read-Host "  WinGet-ID [$($action.id)]").Trim()
                             if ($newId) { $action | Add-Member -NotePropertyName id -NotePropertyValue $newId -Force }
                         }
@@ -965,11 +1157,11 @@ function Edit-CustomConfig {
                     }
                 }
             }
-            "8" {
+            "9" {
                 $index = Select-CustomActionIndex -Actions @($actions) -Prompt "Aktion entfernen"
                 if ($index -ge 0) { $actions.RemoveAt($index) }
             }
-            "9" {
+            "10" {
                 $index = Select-CustomActionIndex -Actions @($actions) -Prompt "Aktion verschieben"
                 if ($index -ge 0) {
                     $direction = Read-MenuChoice -Prompt "1 = nach oben, 2 = nach unten" -AllowedValues @("1", "2")
@@ -1047,6 +1239,8 @@ function Invoke-CustomFileInstaller {
 function Install-CustomConfig {
     param([string]$Path)
 
+    $script:LastCustomConfigSucceeded = $false
+
     $configPath = $Path
     if ([string]::IsNullOrWhiteSpace($configPath)) {
         $configPath = Select-CustomConfigFile
@@ -1096,7 +1290,16 @@ function Install-CustomConfig {
                 throw "Unbekannte Aktion '$actionMode'. Erlaubt sind install und uninstall."
             }
             if ($actionMode -eq 'uninstall') {
-                Uninstall-WingetPackage -Id ([string]$action.id) -Name ([string]$action.matchName)
+                $type = ([string]$action.type).ToLowerInvariant()
+                if ($type -eq 'appx') {
+                    Uninstall-StoreAppPackage -PackageName ([string]$action.packageName) -PackageFamilyName ([string]$action.packageFamilyName)
+                }
+                elseif ($type -eq 'winget' -or [string]::IsNullOrWhiteSpace($type)) {
+                    Uninstall-WingetPackage -Id ([string]$action.id) -Name ([string]$action.matchName)
+                }
+                else {
+                    throw "Nicht unterstuetzter Deinstallationstyp '$type'."
+                }
             }
             else {
                 $type = ([string]$action.type).ToLowerInvariant()
@@ -1138,6 +1341,7 @@ function Install-CustomConfig {
         return $false
     }
     Write-Status -Type Success -Message "Custom-Konfiguration wurde vollstaendig ausgefuehrt."
+    $script:LastCustomConfigSucceeded = $true
     return $true
 }
 
@@ -1991,12 +2195,12 @@ if (-not (Test-IsAdministrator)) {
 if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
     Write-Banner
     Write-Section -Title "UNBEAUFSICHTIGTE JSON-KONFIGURATION"
-    $configSucceeded = Install-CustomConfig -Path $ConfigPath
-    if (-not $configSucceeded) { exit 2 }
+    $null = Install-CustomConfig -Path $ConfigPath
+    if (-not $script:LastCustomConfigSucceeded) { exit 2 }
     exit 0
 }
 
-$startupConfigResult = Invoke-StartupConfigCheck
+$startupConfigResult = @(Invoke-StartupConfigCheck) | Select-Object -Last 1
 if ($startupConfigResult.Executed) {
     if (-not $startupConfigResult.Succeeded) { exit 2 }
     exit 0
