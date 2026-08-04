@@ -65,6 +65,12 @@ Klassische Programme aus `Systemsteuerung > Programme und Features` stehen ebenf
 als Checkliste bereit. Das Profil speichert deren Anzeigenamen und ermittelt den aktuellen
 Deinstallationsbefehl erst auf dem jeweiligen Ziel-PC. MSI-Pakete und bekannte Uninstaller
 werden dabei mit stillen Parametern gestartet.
+Microsoft-365-Click-to-Run-Eintraege werden gesondert behandelt: Der originale
+`OfficeClickToRun.exe`-Befehl aus der Registry bleibt erhalten und wird um
+`displaylevel=false` sowie `forceappshutdown=true` ergaenzt. Dadurch werden keine
+ungueltigen generischen `/quiet`-Parameter mehr angehaengt. Offene Office-Programme
+koennen dabei geschlossen werden; nicht gespeicherte Dokumente sollten daher vor
+der unbeaufsichtigten Ausfuehrung vermieden werden.
 EXE/MSI-Dateien
 koennen in den portablen Unterordner `Installers` kopiert werden. Dabei werden
 relative Pfade und eine SHA-256-Pruefsumme in der JSON-Datei gespeichert.

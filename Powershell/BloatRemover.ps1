@@ -560,6 +560,7 @@ function Invoke-DesktopProgramUninstall {
     $displayName = [string]$Program.DisplayName
     $command = [string]$Program.QuietUninstallString
     $productCode = if ([string]$Program.PSChildName -match '^\{[0-9A-Fa-f-]{36}\}$') { [string]$Program.PSChildName } else { $null }
+    $isOfficeClickToRun = $false
 
     if ($productCode) {
         $filePath = 'msiexec.exe'
@@ -572,6 +573,22 @@ function Invoke-DesktopProgramUninstall {
         if ($command -match '(?i)msiexec(?:\.exe)?\s+.*?(\{[0-9A-F-]{36}\})') {
             $filePath = 'msiexec.exe'
             $arguments = "/x $($Matches[1]) /qn /norestart"
+        }
+        elseif ($command -match '(?i)OfficeClickToRun\.exe') {
+            $officeMatch = [regex]::Match($command, '^\s*"(?<exe>[^"]*OfficeClickToRun\.exe)"\s*(?<args>.*)$', 'IgnoreCase')
+            if (-not $officeMatch.Success) {
+                $officeMatch = [regex]::Match($command, '^\s*(?<exe>\S*OfficeClickToRun\.exe)\s*(?<args>.*)$', 'IgnoreCase')
+            }
+            if (-not $officeMatch.Success) {
+                throw "Microsoft-365-Click-to-Run-Befehl konnte nicht ausgewertet werden: $command"
+            }
+
+            $filePath = $officeMatch.Groups['exe'].Value
+            $arguments = $officeMatch.Groups['args'].Value.Trim()
+            if ($arguments -notmatch '(?i)(^|\s)displaylevel=') { $arguments += ' displaylevel=false' }
+            if ($arguments -notmatch '(?i)(^|\s)forceappshutdown=') { $arguments += ' forceappshutdown=true' }
+            $arguments = $arguments.Trim()
+            $isOfficeClickToRun = $true
         }
         else {
             if ($command -notmatch '(?i)(/quiet|/qn|/silent|/verysilent|/s(?:\s|$)|--silent)') {
@@ -591,9 +608,13 @@ function Invoke-DesktopProgramUninstall {
     }
 
     Write-Host "  Deinstalliere Desktop-Programm: $displayName"
+    if ($isOfficeClickToRun) {
+        Write-Status -Type Info -Message "Microsoft 365 Click-to-Run wird ohne Benutzeroberflaeche entfernt. Offene Office-Apps werden dabei geschlossen."
+    }
     $process = Start-Process -FilePath $filePath -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
     if ($process.ExitCode -notin @(0, 1605, 1614, 1641, 3010)) {
-        throw "Deinstallation von '$displayName' endete mit Exitcode $($process.ExitCode)."
+        $details = if ($isOfficeClickToRun) { " Microsoft-365-Protokolle befinden sich normalerweise unter '%TEMP%' oder '%ProgramData%\Microsoft\Office\ClickToRun\Log'." } else { '' }
+        throw "Deinstallation von '$displayName' endete mit Exitcode $($process.ExitCode).$details"
     }
 }
 
