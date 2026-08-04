@@ -1,7 +1,8 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "name": "Beispiel-SAP-Arbeitsplatz",
   "createdAt": "2026-08-04T00:00:00.0000000+02:00",
+  "startupMode": "prompt",
   "restartExplorer": false,
   "energy": {
     "preset": "Balanced",
@@ -11,6 +12,12 @@
     "usbPowerSaving": "enabled"
   },
   "actions": [
+    {
+      "action": "runTask",
+      "name": "HP-Bloatware entfernen",
+      "type": "system",
+      "task": "hpDebloat"
+    },
     {
       "action": "replaceFile",
       "name": "Firmenkonfiguration verteilen",

@@ -900,6 +900,35 @@ function Invoke-CustomConfigEnergy {
     elseif ($usbPowerSaving -eq 'disabled') { Set-UsbPowerSaving -Enabled $false }
 }
 
+function Get-NormalizedStartupMode {
+    param([AllowNull()][string]$Value)
+
+    if ([string]$Value -match '^(?i:automatic|auto|autostart)$') { return 'automatic' }
+    return 'prompt'
+}
+
+function Read-CustomConfigStartupMode {
+    Write-Host ""
+    Write-Section -Title "STARTVERHALTEN DER CONFIG"
+    Write-MenuItem -Key "1" -Label "Beim Fund nachfragen" -Hint "sicherer Standard"
+    Write-MenuItem -Key "2" -Label "Sofort automatisch ausfuehren" -Hint "keine Eingabe beim Skriptstart"
+    $choice = Read-MenuChoice -Prompt "Startverhalten" -AllowedValues @("1", "2")
+    if ($choice -eq "2") { return 'automatic' }
+    return 'prompt'
+}
+
+function Get-CustomConfigFileStartupMode {
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        $config = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        return (Get-NormalizedStartupMode -Value ([string]$config.startupMode))
+    }
+    catch {
+        return 'prompt'
+    }
+}
+
 function New-CustomInstallConfig {
     Write-Banner
     Write-Section -Title "JSON CONFIG BUILDER"
@@ -909,6 +938,7 @@ function New-CustomInstallConfig {
     Write-Host ""
 
     $configName = Read-RequiredValue -Prompt "Name der Konfiguration"
+    $startupMode = Read-CustomConfigStartupMode
     $actions = [System.Collections.Generic.List[object]]::new()
 
     do {
@@ -921,8 +951,9 @@ function New-CustomInstallConfig {
         Write-MenuItem -Key "5" -Label "Store-Apps deinstallieren" -Hint "installierte Apps per Checkliste auswaehlen"
         Write-MenuItem -Key "6" -Label "Programme und Features deinstallieren" -Hint "klassische Desktop-Programme per Checkliste"
         Write-MenuItem -Key "7" -Label "Datei automatisch ersetzen" -Hint "z. B. Konfigurationsdatei vom USB-Stick"
+        Write-MenuItem -Key "8" -Label "HP-Debloat ausfuehren" -Hint "HP Support Assistant bleibt erhalten"
         Write-MenuItem -Key "0" -Label "Builder abschliessen"
-        $typeChoice = Read-MenuChoice -Prompt "Aktion" -AllowedValues @("0", "1", "2", "3", "4", "5", "6", "7")
+        $typeChoice = Read-MenuChoice -Prompt "Aktion" -AllowedValues @("0", "1", "2", "3", "4", "5", "6", "7", "8")
         if ($typeChoice -eq "0") { break }
 
         if ($typeChoice -eq "1") {
@@ -999,6 +1030,25 @@ function New-CustomInstallConfig {
                 CreateDirectory = $true
             })
             Write-Status -Type Success -Message "'$displayName' wurde vorgemerkt."
+            $continueAnswer = Read-Host "  Weitere Aktion hinzufuegen? [J/n]"
+            if ($continueAnswer -match '^(?i:n|nein|no)$') { break }
+            continue
+        }
+
+        if ($typeChoice -eq "8") {
+            $alreadyAdded = @($actions | Where-Object { $_.Action -eq 'runTask' -and $_.Task -eq 'hpDebloat' }).Count -gt 0
+            if ($alreadyAdded) {
+                Write-Status -Type Info -Message "HP-Debloat ist bereits in der Config enthalten."
+            }
+            else {
+                $actions.Add([pscustomobject]@{
+                    Action = 'runTask'
+                    Name = 'HP-Bloatware entfernen'
+                    Type = 'system'
+                    Task = 'hpDebloat'
+                })
+                Write-Status -Type Success -Message "HP-Debloat wurde vorgemerkt."
+            }
             $continueAnswer = Read-Host "  Weitere Aktion hinzufuegen? [J/n]"
             if ($continueAnswer -match '^(?i:n|nein|no)$') { break }
             continue
@@ -1092,6 +1142,16 @@ function New-CustomInstallConfig {
     $serializedActions = [System.Collections.Generic.List[object]]::new()
 
     foreach ($action in $actions) {
+        if ($action.Action -eq 'runTask') {
+            $serializedActions.Add([ordered]@{
+                action = 'runTask'
+                name = $action.Name
+                type = 'system'
+                task = $action.Task
+            })
+            continue
+        }
+
         if ($action.Action -eq 'replaceFile') {
             $savedPath = $action.SourcePath
             $hash = (Get-FileHash -LiteralPath $action.SourcePath -Algorithm SHA256 -ErrorAction Stop).Hash
@@ -1172,9 +1232,10 @@ function New-CustomInstallConfig {
     }
 
     $config = [ordered]@{
-        schemaVersion = 2
+        schemaVersion = 3
         name = $configName
         createdAt = (Get-Date).ToString('o')
+        startupMode = $startupMode
         restartExplorer = $restartExplorer
         energy = $energy
         actions = $serializedActions
@@ -1285,6 +1346,24 @@ function Invoke-StartupConfigCheck {
         return [pscustomobject]@{ Executed = $false; Succeeded = $true }
     }
 
+    $automaticConfigs = @($configs | Where-Object {
+        (Get-CustomConfigFileStartupMode -Path $_.FullName) -eq 'automatic'
+    })
+    if ($automaticConfigs.Count -gt 0) {
+        Write-Banner
+        Write-Section -Title "AUTOMATISCHE JSON-KONFIGURATION"
+        Write-Host ""
+        Write-Status -Type Info -Message "$($automaticConfigs.Count) Config(s) mit startupMode=automatic werden ohne Rueckfrage ausgefuehrt."
+
+        $allSucceeded = $true
+        foreach ($automaticConfig in $automaticConfigs) {
+            Write-Status -Type Info -Message "Starte automatisch: $($automaticConfig.BaseName)  [$($automaticConfig.DirectoryName)]"
+            $null = Install-CustomConfig -Path $automaticConfig.FullName
+            if (-not $script:LastCustomConfigSucceeded) { $allSucceeded = $false }
+        }
+        return [pscustomobject]@{ Executed = $true; Succeeded = $allSucceeded }
+    }
+
     Write-Banner
     Write-Section -Title "JSON-KONFIGURATION GEFUNDEN"
     Write-Host ""
@@ -1317,9 +1396,9 @@ function Get-CustomActionSummary {
     param([Parameter(Mandatory)]$Action)
 
     $actionMode = ([string]$Action.action).ToLowerInvariant()
-    $mode = if ($actionMode -eq 'uninstall') { 'Deinstallieren' } elseif ($actionMode -eq 'replacefile') { 'Datei ersetzen' } else { 'Installieren' }
+    $mode = if ($actionMode -eq 'uninstall') { 'Deinstallieren' } elseif ($actionMode -eq 'replacefile') { 'Datei ersetzen' } elseif ($actionMode -eq 'runtask') { 'Systemaktion' } else { 'Installieren' }
     $type = ([string]$Action.type).ToUpperInvariant()
-    $target = if ($Action.id) { $Action.id } elseif ($Action.matchName) { $Action.matchName } elseif ($Action.packageName) { $Action.packageName } elseif ($Action.target) { $Action.target } elseif ($Action.path) { $Action.path } else { '-' }
+    $target = if ($Action.id) { $Action.id } elseif ($Action.matchName) { $Action.matchName } elseif ($Action.packageName) { $Action.packageName } elseif ($Action.target) { $Action.target } elseif ($Action.task) { $Action.task } elseif ($Action.path) { $Action.path } else { '-' }
     return "$mode | $type | $target"
 }
 
@@ -1335,6 +1414,8 @@ function Show-CustomConfigEditorState {
     Write-Host ""
     Write-Status -Type Info -Message "Datei: $Path"
     Write-Status -Type Info -Message "Profilname: $($Config.name)"
+    $startupMode = Get-NormalizedStartupMode -Value ([string]$Config.startupMode)
+    Write-Status -Type Info -Message "Startverhalten: $(if ($startupMode -eq 'automatic') { 'Sofort automatisch' } else { 'Beim Fund nachfragen' })"
     Write-Status -Type Info -Message "Explorer-Neustart: $(if ($Config.restartExplorer -eq $true) { 'Ja' } else { 'Nein' })"
     Write-Status -Type Info -Message "Energie: $(Get-CustomConfigEnergySummary -Energy $Config.energy)"
     Write-Host ""
@@ -1543,7 +1624,8 @@ function Save-CustomConfigObject {
         [Parameter(Mandatory)][string]$Path
     )
 
-    $Config | Add-Member -NotePropertyName schemaVersion -NotePropertyValue 2 -Force
+    $Config | Add-Member -NotePropertyName schemaVersion -NotePropertyValue 3 -Force
+    $Config | Add-Member -NotePropertyName startupMode -NotePropertyValue (Get-NormalizedStartupMode -Value ([string]$Config.startupMode)) -Force
     $Config | Add-Member -NotePropertyName modifiedAt -NotePropertyValue ((Get-Date).ToString('o')) -Force
     $Config | Add-Member -NotePropertyName actions -NotePropertyValue @($Actions) -Force
     if ($Config.PSObject.Properties.Name -contains 'applications') {
@@ -1591,6 +1673,8 @@ function Edit-CustomConfig {
         Write-MenuItem -Key "10" -Label "Aktion bearbeiten"
         Write-MenuItem -Key "11" -Label "Aktion entfernen"
         Write-MenuItem -Key "12" -Label "Aktionsreihenfolge aendern"
+        Write-MenuItem -Key "13" -Label "Startverhalten aendern" -Hint "automatisch oder nachfragen"
+        Write-MenuItem -Key "14" -Label "HP-Debloat hinzufuegen" -Hint "HP Support Assistant bleibt erhalten"
         Write-MenuItem -Key "S" -Label "Speichern und Editor schliessen"
         Write-MenuItem -Key "0" -Label "Ohne Speichern schliessen"
         $choice = (Read-Host "  Auswahl").Trim().ToLowerInvariant()
@@ -1761,6 +1845,21 @@ function Edit-CustomConfig {
             "12" {
                 Edit-CustomActionOrder -Actions $actions
             }
+            "13" {
+                $config | Add-Member -NotePropertyName startupMode -NotePropertyValue (Read-CustomConfigStartupMode) -Force
+            }
+            "14" {
+                $duplicate = @($actions | Where-Object { $_.action -eq 'runTask' -and $_.task -eq 'hpDebloat' }).Count -gt 0
+                if ($duplicate) {
+                    Write-Status -Type Info -Message "HP-Debloat ist bereits in der Config enthalten."
+                }
+                else {
+                    $actions.Add([pscustomobject][ordered]@{
+                        action = 'runTask'; name = 'HP-Bloatware entfernen'; type = 'system'; task = 'hpDebloat'
+                    })
+                    Write-Status -Type Success -Message "HP-Debloat wurde zur Config hinzugefuegt."
+                }
+            }
             "s" {
                 if ($actions.Count -eq 0 -and $null -eq $config.energy) {
                     Write-Status -Type Warning -Message "Mindestens eine Programm-Aktion oder Energieeinstellung ist erforderlich."
@@ -1871,13 +1970,23 @@ function Install-CustomConfig {
         Write-Host ""
         $actionMode = ([string]$action.action).ToLowerInvariant()
         if ([string]::IsNullOrWhiteSpace($actionMode)) { $actionMode = 'install' }
-        $verb = if ($actionMode -eq 'uninstall') { 'Deinstalliere' } elseif ($actionMode -eq 'replacefile') { 'Ersetze Datei' } else { 'Installiere' }
+        $verb = if ($actionMode -eq 'uninstall') { 'Deinstalliere' } elseif ($actionMode -eq 'replacefile') { 'Ersetze Datei' } elseif ($actionMode -eq 'runtask') { 'Fuehre Systemaktion aus' } else { 'Installiere' }
         Write-Status -Type Info -Message "$verb`: $($action.name)"
         try {
-            if ($actionMode -notin @('install', 'uninstall', 'replacefile')) {
-                throw "Unbekannte Aktion '$actionMode'. Erlaubt sind install, uninstall und replaceFile."
+            if ($actionMode -notin @('install', 'uninstall', 'replacefile', 'runtask')) {
+                throw "Unbekannte Aktion '$actionMode'. Erlaubt sind install, uninstall, replaceFile und runTask."
             }
-            if ($actionMode -eq 'replacefile') {
+            if ($actionMode -eq 'runtask') {
+                if (([string]$action.type).ToLowerInvariant() -ne 'system') { throw "Systemaktionen muessen den Typ 'system' verwenden." }
+                $task = ([string]$action.task).ToLowerInvariant()
+                if ($task -eq 'hpdebloat') {
+                    Remove-HPBloat
+                }
+                else {
+                    throw "Nicht unterstuetzte Systemaktion '$task'."
+                }
+            }
+            elseif ($actionMode -eq 'replacefile') {
                 if (([string]$action.type).ToLowerInvariant() -ne 'file') { throw "Datei-Aktionen muessen den Typ 'file' verwenden." }
                 Invoke-CustomFileReplacement -Action $action -ConfigDirectory $configDirectory
             }

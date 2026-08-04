@@ -49,8 +49,11 @@ Im Hauptmenue stehen zwei zusaetzliche Werkzeuge bereit:
 Beim normalen Skriptstart werden gueltige Custom-Configs automatisch gesucht.
 Gefunden werden JSON-Dateien neben dem Skript, in lokalen `Configs`-Ordnern,
 unter `BloatRemoverConfigs` und direkt im Stamm eingebundener Laufwerke. Fremde,
-ungueltige und `*.example.json`-Dateien werden ignoriert. Bei einem Treffer fragt
-das Skript sofort, ob das Profil unbeaufsichtigt ausgefuehrt werden soll.
+ungueltige und `*.example.json`-Dateien werden ignoriert. Das Feld `startupMode`
+legt das Verhalten eines gefundenen Profils fest: `prompt` fragt vor der Ausfuehrung,
+`automatic` startet es sofort ohne Eingabe. Bestehende Profile ohne dieses Feld
+verwenden weiterhin den sicheren Standard `prompt`. Sind mehrere Profile explizit
+auf `automatic` gesetzt, werden sie der Reihe nach ausgefuehrt.
 
 Profile koennen WinGet-, EXE- und MSI-Installationen sowie Deinstallationen per
 exakter WinGet-ID, installiertem Programmnamen oder Appx/MSIX-Paketnamen enthalten. Store-Apps
@@ -85,6 +88,11 @@ Zielordner koennen automatisch angelegt werden. Eine vorhandene Zieldatei wird
 standardmaessig zuvor unter `.BloatRemoverBackups` im Zielordner gesichert. Die
 eigentliche Ersetzung erfolgt erst beim unbeaufsichtigten Config-Start und ohne
 weitere Rueckfrage.
+
+Der vollstaendige HP-Debloat kann als geordnete Config-Aktion `runTask` mit dem
+Task `hpDebloat` aufgenommen werden. Er laeuft an seiner Position in der
+Aktionsreihenfolge automatisch ab. HP Support Assistant, seine Support-Frameworks
+sowie Treiber, Firmware und BIOS-Komponenten bleiben wie beim Hauptmenue erhalten.
 
 Der Energieblock eines Profils unterstuetzt die Profile Energiesparend,
 Ausgeglichen und Leistung, eigene Zeitlimits fuer Netz- und Akkubetrieb sowie
