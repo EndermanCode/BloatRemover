@@ -119,97 +119,276 @@ function Install-Updates {
 }
 
 function Remove-HPBloat {
-    ##HP Specific
-    $UninstallPrograms = @(
-        "HP Client Security Manager"
-        "HP Notifications"
-        "HP Security Update Service"
-        "HP System Default Settings"
-        "HP Wolf Security"
-        "HP Wolf Security Application Support for Sure Sense"
-        "HP Wolf Security Application Support for Windows"
-        "AD2F1837.HPPCHardwareDiagnosticsWindows"
-        "AD2F1837.HPPowerManager"
-        "AD2F1837.HPPrivacySettings"
-        "AD2F1837.HPQuickDrop"
-        "AD2F1837.HPSystemInformation"
-        "AD2F1837.myHP"
-        "RealtekSemiconductorCorp.HPAudioControl"
-        "HP Sure Recover"
-        "HP Sure Run Module"
-        ""
+    Write-Status -Type Info -Message "HP-Software wird ermittelt. HP Support Assistant und seine Support-Frameworks bleiben erhalten."
+
+    # Mehrere Durchlaeufe sind absichtlich: Manche HP-Deinstallationen legen nachgelagerte
+    # Komponenten erst frei, nachdem das Hauptprodukt entfernt wurde.
+    for ($pass = 1; $pass -le 3; $pass++) {
+        $provisionedPackages = @(Get-HPProvisionedPackages)
+        $installedPackages = @(Get-HPAppxPackages)
+        $installedPrograms = @(Get-HPInstalledPrograms)
+        $candidateCount = $provisionedPackages.Count + $installedPackages.Count + $installedPrograms.Count
+
+        if ($candidateCount -eq 0) { break }
+
+        Write-Status -Type Info -Message ("HP-Durchlauf {0}: {1} provisionierte Apps, {2} installierte Apps, {3} Desktop-Programme." -f $pass, $provisionedPackages.Count, $installedPackages.Count, $installedPrograms.Count)
+
+        foreach ($package in $provisionedPackages) {
+            Write-Host "  Entferne provisionierte App: $($package.DisplayName)"
+            try {
+                Remove-AppxProvisionedPackage -Online -PackageName $package.PackageName -AllUsers -ErrorAction Stop | Out-Null
+            }
+            catch {
+                Write-Status -Type Warning -Message "Provisionierte App '$($package.DisplayName)' konnte nicht entfernt werden: $($_.Exception.Message)"
+            }
+        }
+
+        foreach ($package in $installedPackages) {
+            Write-Host "  Entferne Store-App: $($package.Name)"
+            try {
+                Remove-AppxPackage -Package $package.PackageFullName -AllUsers -ErrorAction Stop
+            }
+            catch {
+                # Auf aelteren Windows-Builds steht -AllUsers nicht immer verlaesslich zur
+                # Verfuegung. Der zweite Versuch entfernt zumindest das aktuelle Benutzerpaket.
+                try {
+                    Remove-AppxPackage -Package $package.PackageFullName -ErrorAction Stop
+                }
+                catch {
+                    Write-Status -Type Warning -Message "Store-App '$($package.Name)' konnte nicht entfernt werden: $($_.Exception.Message)"
+                }
+            }
+        }
+
+        foreach ($program in $installedPrograms) {
+            Invoke-HPProgramUninstall -Program $program
+        }
+    }
+
+    Remove-HPDocumentation
+    Remove-HPOrphans
+
+    $remainingProvisioned = @(Get-HPProvisionedPackages)
+    $remainingPackages = @(Get-HPAppxPackages)
+    $remainingPrograms = @(Get-HPInstalledPrograms)
+    $remaining = $remainingProvisioned.Count + $remainingPackages.Count + $remainingPrograms.Count
+
+    if ($remaining -gt 0) {
+        $remainingNames = @(
+            $remainingProvisioned | ForEach-Object { $_.DisplayName }
+            $remainingPackages | ForEach-Object { $_.Name }
+            $remainingPrograms | ForEach-Object { $_.DisplayName }
+        ) | Sort-Object -Unique
+        Write-Status -Type Warning -Message "Einige HP-Komponenten melden sich weiterhin als installiert: $($remainingNames -join ', ')"
+        throw "$remaining HP-Komponente(n) konnten nicht vollstaendig entfernt werden. Details stehen oben im Protokoll."
+    }
+
+    Write-Status -Type Success -Message "HP-Software wurde entfernt; HP Support Assistant und seine Support-Frameworks wurden beibehalten."
+}
+
+function Test-HPProtectedComponent {
+    param([AllowNull()][string]$Name)
+
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    return $Name -match '(?i)(HP\s*Support\s*Assistant|HPSupportAssistant|HP\s*Support\s*Solutions\s*Framework|HP\s*Support\s*Framework|HPSF)'
+}
+
+function Test-HPDriverOrFirmware {
+    param([AllowNull()][string]$Name, [AllowNull()][string]$Path)
+
+    $text = "$Name $Path"
+    return $text -match '(?i)(\bdriver\b|firmware|\bBIOS\b|chipset|System32\\drivers)'
+}
+
+function Test-HPComponent {
+    param(
+        [AllowNull()][string]$Name,
+        [AllowNull()][string]$Publisher,
+        [AllowNull()][string]$Identity
     )
 
-    $HPidentifier = "AD2F1837"
+    $text = "$Name $Publisher $Identity"
+    if (Test-HPProtectedComponent -Name $text) { return $false }
+    if (Test-HPDriverOrFirmware -Name $Name -Path $Identity) { return $false }
 
-    $InstalledPackages = @(Get-AppxPackage -AllUsers | Where-Object {($UninstallPrograms -contains $_.Name) -or ($_.Name -match "^$HPidentifier")})
+    return (
+        $Name -match '(?i)(^|[\s._-])HP($|[\s._-])|Hewlett[ -]Packard|^myHP$|^AD2F1837\.|HPAudioControl|HPWolfSecurity' -or
+        $Publisher -match '(?i)(^|\b)(HP Inc\.?|Hewlett[ -]Packard|HP Development Company|Poly)(\b|$)' -or
+        $Identity -match '(?i)(^|[\\._-])HP($|[\\._-])|AD2F1837|Hewlett[ -]Packard'
+    )
+}
 
-    $ProvisionedPackages = @(Get-AppxProvisionedPackage -Online | Where-Object {($UninstallPrograms -contains $_.DisplayName) -or ($_.DisplayName -match "^$HPidentifier")})
+function Get-HPAppxPackages {
+    @(
+        Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue |
+            Where-Object {
+                Test-HPComponent -Name $_.Name -Publisher $_.PublisherDisplayName -Identity $_.PackageFamilyName
+            } |
+            Sort-Object PackageFullName -Unique
+    )
+}
 
-    $InstalledPrograms = @(Get-Package | Where-Object {$UninstallPrograms -contains $_.Name})
+function Get-HPProvisionedPackages {
+    @(
+        Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+            Where-Object {
+                Test-HPComponent -Name $_.DisplayName -Publisher $_.PublisherId -Identity $_.PackageName
+            } |
+            Sort-Object PackageName -Unique
+    )
+}
 
-    Write-Host ("HP Apps (installed): {0}, provisioned: {1}, programs: {2}" -f $InstalledPackages.Count, $ProvisionedPackages.Count, $InstalledPrograms.Count)
-    if (($InstalledPackages.Count + $ProvisionedPackages.Count + $InstalledPrograms.Count) -eq 0) {
-        Write-Host "No HP apps found to remove."
+function Get-HPInstalledPrograms {
+    $uninstallRoots = @(
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+
+    $userSids = @(
+        Get-ChildItem -Path 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSChildName -match '^S-1-5-21-' } |
+            Select-Object -ExpandProperty PSChildName
+    )
+    foreach ($sid in $userSids) {
+        $uninstallRoots += "Registry::HKEY_USERS\$sid\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
+        $uninstallRoots += "Registry::HKEY_USERS\$sid\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
     }
 
-    # Remove provisioned packages first
-    ForEach ($ProvPackage in $ProvisionedPackages) {
+    $programs = foreach ($root in $uninstallRoots) {
+        Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
+            Where-Object {
+                -not [string]::IsNullOrWhiteSpace($_.DisplayName) -and
+                (Test-HPComponent -Name $_.DisplayName -Publisher $_.Publisher -Identity "$($_.InstallLocation) $($_.PSChildName)")
+            }
+    }
 
-        Write-Host -Object "Attempting to remove provisioned package: [$($ProvPackage.DisplayName)]..."
+    @($programs | Sort-Object PSPath -Unique)
+}
 
-        Try {
-            $Null = Remove-AppxProvisionedPackage -PackageName $ProvPackage.PackageName -Online -ErrorAction Stop
-            Write-Host -Object "Successfully removed provisioned package: [$($ProvPackage.DisplayName)]"
+function Invoke-HPProgramUninstall {
+    param([Parameter(Mandatory)]$Program)
+
+    $name = $Program.DisplayName
+    $command = $Program.QuietUninstallString
+    $productCode = if ($Program.PSChildName -match '^\{[0-9A-Fa-f-]{36}\}$') { $Program.PSChildName } else { $null }
+
+    if ($productCode) {
+        $filePath = 'msiexec.exe'
+        $arguments = "/x $productCode /qn /norestart"
+    }
+    else {
+        if ([string]::IsNullOrWhiteSpace($command)) { $command = $Program.UninstallString }
+        if ([string]::IsNullOrWhiteSpace($command)) {
+            Write-Status -Type Warning -Message "Fuer '$name' wurde kein Deinstallationsbefehl gefunden."
+            return
         }
-        Catch {Write-Warning -Message "Failed to remove provisioned package: [$($ProvPackage.DisplayName)]"}
-    }
 
-    # Remove appx packages
-    ForEach ($AppxPackage in $InstalledPackages) {
-                                            
-        Write-Host -Object "Attempting to remove Appx package: [$($AppxPackage.Name)]..."
-
-        Try {
-            $Null = Remove-AppxPackage -Package $AppxPackage.PackageFullName -AllUsers -ErrorAction Stop
-            Write-Host -Object "Successfully removed Appx package: [$($AppxPackage.Name)]"
+        if ($command -match '(?i)msiexec(?:\.exe)?\s+.*?(\{[0-9A-F-]{36}\})') {
+            $filePath = 'msiexec.exe'
+            $arguments = "/x $($Matches[1]) /qn /norestart"
         }
-        Catch {Write-Warning -Message "Failed to remove Appx package: [$($AppxPackage.Name)]"}
-    }
-
-    # Remove installed programs
-    $InstalledPrograms | ForEach-Object {
-
-        Write-Host -Object "Attempting to uninstall: [$($_.Name)]..."
-
-        Try {
-            $Null = $_ | Uninstall-Package -AllVersions -Force -ErrorAction Stop
-            Write-Host -Object "Successfully uninstalled: [$($_.Name)]"
+        else {
+            $filePath = "$env:SystemRoot\System32\cmd.exe"
+            if ($command -notmatch '(?i)(/quiet|/qn|/silent|/verysilent|/s(?:\s|$))') {
+                $command += ' /quiet /norestart'
+            }
+            $arguments = @('/d', '/s', '/c', $command)
         }
-        Catch {Write-Warning -Message "Failed to uninstall: [$($_.Name)]"}
     }
 
-
-    #Remove HP Documentation
-    $A = Start-Process -FilePath "C:\Program Files\HP\Documentation\Doc_uninstall.cmd" -Wait -passthru -NoNewWindow;$a.ExitCode
-
-    ##Remove Standard HP apps via msiexec
-    $InstalledPrograms | ForEach-Object {
-    $appname = $_.Name
-        Write-Host -Object "Attempting to uninstall: [$($_.Name)]..."
-
-        Try {
-            $Prod = Get-WMIObject -Classname Win32_Product | Where-Object Name -Match $appname
-            $Prod.UnInstall()
-            Write-Host -Object "Successfully uninstalled: [$($_.Name)]"
+    Write-Host "  Deinstalliere Desktop-Programm: $name"
+    try {
+        $process = Start-Process -FilePath $filePath -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
+        if ($process.ExitCode -notin @(0, 1605, 1614, 1641, 3010)) {
+            Write-Status -Type Warning -Message "Deinstallation von '$name' endete mit Exitcode $($process.ExitCode)."
         }
-        Catch {Write-Warning -Message "Failed to uninstall: [$($_.Name)]"}
     }
-    Write-Host "Removed HP bloat"
+    catch {
+        Write-Status -Type Warning -Message "Deinstallation von '$name' ist fehlgeschlagen: $($_.Exception.Message)"
+    }
+}
+
+function Remove-HPDocumentation {
+    $uninstaller = 'C:\Program Files\HP\Documentation\Doc_uninstall.cmd'
+    if (-not (Test-Path -LiteralPath $uninstaller)) { return }
+
+    Write-Host "  Entferne HP Documentation"
+    try {
+        $command = '"' + $uninstaller + '"'
+        $process = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList @('/d', '/s', '/c', $command) -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
+        if ($process.ExitCode -ne 0) {
+            Write-Status -Type Warning -Message "HP Documentation endete mit Exitcode $($process.ExitCode)."
+        }
+    }
+    catch {
+        Write-Status -Type Warning -Message "HP Documentation konnte nicht entfernt werden: $($_.Exception.Message)"
+    }
+}
+
+function Remove-HPOrphans {
+    Write-Status -Type Info -Message "Verwaiste HP-Dienste, Aufgaben, Verknuepfungen und Produktordner werden bereinigt."
+
+    $services = @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object {
+        (Test-HPComponent -Name $_.DisplayName -Publisher '' -Identity "$($_.Name) $($_.PathName)") -and
+        -not (Test-HPDriverOrFirmware -Name $_.DisplayName -Path $_.PathName)
+    })
+    foreach ($service in $services) {
+        try {
+            if ($service.State -ne 'Stopped') {
+                Stop-Service -Name $service.Name -Force -ErrorAction SilentlyContinue
+            }
+            & sc.exe delete $service.Name 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1060) {
+                Write-Status -Type Warning -Message "Dienst '$($service.DisplayName)' konnte nicht geloescht werden (Exitcode $LASTEXITCODE)."
+            }
+        }
+        catch {
+            Write-Status -Type Warning -Message "Dienst '$($service.DisplayName)' konnte nicht bereinigt werden."
+        }
+    }
+
+    $tasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
+        Test-HPComponent -Name $_.TaskName -Publisher '' -Identity $_.TaskPath
+    })
+    foreach ($task in $tasks) {
+        try {
+            Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Confirm:$false -ErrorAction Stop
+        }
+        catch {
+            Write-Status -Type Warning -Message "Aufgabe '$($task.TaskPath)$($task.TaskName)' konnte nicht geloescht werden."
+        }
+    }
+
+    $shortcutRoots = @($pathTaskbar, $pathStartmenu, "$env:ProgramData\Microsoft\Windows\Start Menu\Programs", "$env:APPDATA\Microsoft\Windows\Start Menu\Programs")
+    foreach ($root in ($shortcutRoots | Sort-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        Get-ChildItem -LiteralPath $root -Filter '*.lnk' -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { (Test-HPComponent -Name $_.BaseName -Publisher '' -Identity $_.FullName) } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    $productRoots = @(
+        "$env:ProgramFiles\HP"
+        "${env:ProgramFiles(x86)}\HP"
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) }
+
+    foreach ($root in $productRoots) {
+        Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue |
+            Where-Object {
+                -not (Test-HPProtectedComponent -Name $_.Name) -and
+                -not (Test-HPDriverOrFirmware -Name $_.Name -Path $_.FullName)
+            } |
+            ForEach-Object {
+                try { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop }
+                catch { Write-Status -Type Warning -Message "Rest '$($_.FullName)' konnte nicht geloescht werden." }
+            }
+    }
 }
 
 function Write-Banner {
-    Clear-Host
+    param([switch]$NoClear)
+
+    if (-not $NoClear) { Clear-Host }
     try { $Host.UI.RawUI.WindowTitle = "BloatRemover - Windows Setup" } catch {}
 
     Write-Host ""
@@ -277,6 +456,42 @@ function Read-MenuChoice {
     } while ($true)
 }
 
+function Read-MultiMenuChoice {
+    param(
+        [Parameter(Mandatory)][string]$Prompt,
+        [Parameter(Mandatory)][string[]]$AllowedValues,
+        [string[]]$AllValues = @()
+    )
+
+    do {
+        Write-Host ""
+        $rawChoice = (Read-Host "  $Prompt").Trim()
+        if ($rawChoice -match '^(?i:a|all|alle)$') {
+            if ($AllValues.Count -gt 0) { return $AllValues }
+        }
+
+        $values = @(
+            $rawChoice -split '[,;\s]+' |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Select-Object -Unique
+        )
+
+        $invalidValues = @($values | Where-Object { $AllowedValues -notcontains $_ })
+        if ($values.Count -eq 0 -or $invalidValues.Count -gt 0) {
+            Write-Status -Type Warning -Message "Ungueltige Auswahl. Mehrere Werte mit Komma trennen. Erlaubt: $($AllowedValues -join ', '), alle"
+            continue
+        }
+        if ($values.Count -gt 1 -and $values -contains '0') {
+            Write-Status -Type Warning -Message "'0' kann nicht mit anderen Aktionen kombiniert werden."
+            continue
+        }
+
+        # Aktionen immer in der sichtbaren Menue-Reihenfolge ausfuehren, unabhaengig
+        # davon, in welcher Reihenfolge sie eingegeben wurden.
+        return @($AllowedValues | Where-Object { $values -contains $_ })
+    } while ($true)
+}
+
 function Read-Integer {
     param(
         [Parameter(Mandatory)][string]$Prompt,
@@ -318,10 +533,11 @@ function Test-IsAdministrator {
 function Invoke-MenuAction {
     param(
         [Parameter(Mandatory)][string]$Title,
-        [Parameter(Mandatory)][scriptblock]$Action
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [switch]$NoWait
     )
 
-    Write-Banner
+    Write-Banner -NoClear:$NoWait
     Write-Section -Title $Title
     Write-Host ""
     try {
@@ -333,7 +549,7 @@ function Invoke-MenuAction {
         Write-Host ""
         Write-Status -Type Error -Message $_.Exception.Message
     }
-    Wait-ForUser
+    if (-not $NoWait) { Wait-ForUser }
 }
 
 function Invoke-PowerCfg {
@@ -608,39 +824,59 @@ function Show-MainMenu {
         Write-MenuItem -Key "4" -Label "Taskleiste und Startmenue bereinigen"
         Write-MenuItem -Key "5" -Label "Energy Center" -Hint "Profile und erweiterte Energieoptionen"
         Write-MenuItem -Key "6" -Label ".NET Framework 3.5 installieren"
+        Write-MenuItem -Key "A" -Label "Alle automatischen Aktionen" -Hint "1, 2, 3, 4 und 6 nacheinander"
         Write-MenuItem -Key "0" -Label "Beenden"
+        Write-Host ""
+        Write-Status -Type Info -Message "Mehrfachauswahl mit Komma: z. B. 1,2,4,6"
 
-        $choice = Read-MenuChoice -Prompt "Auswahl" -AllowedValues @("0", "1", "2", "3", "4", "5", "6")
-        switch ($choice) {
+        $choices = @(Read-MultiMenuChoice -Prompt "Auswahl" -AllowedValues @("0", "1", "2", "3", "4", "5", "6") -AllValues @("1", "2", "3", "4", "6"))
+        if ($choices -contains "0") { break }
+
+        $actionLabels = @{
+            "1" = "HP-Bloatware entfernen"
+            "2" = "Standard-Apps installieren"
+            "3" = "Windows Updates installieren"
+            "4" = "Taskleiste und Startmenue bereinigen"
+            "5" = "Energy Center oeffnen"
+            "6" = ".NET Framework 3.5 installieren"
+        }
+        $selectedLabels = @($choices | ForEach-Object { $actionLabels[$_] })
+        Write-Host ""
+        Write-Status -Type Info -Message "Reihenfolge: $($selectedLabels -join ' -> ')"
+        if (-not (Confirm-Action -Message "Ausgewaehlte Aktionen jetzt nacheinander ausfuehren?")) {
+            continue
+        }
+
+        switch ($choices) {
             "1" {
-                if (Confirm-Action -Message "Wirklich alle gefundenen HP-Komponenten entfernen?") {
-                    Invoke-MenuAction -Title "HP-BLOATWARE ENTFERNEN" -Action { Remove-HPBloat }
-                }
+                Invoke-MenuAction -Title "HP-BLOATWARE ENTFERNEN" -Action { Remove-HPBloat } -NoWait
             }
             "2" {
-                if (Confirm-Action -Message "Standard-Apps jetzt installieren?") {
-                    Invoke-MenuAction -Title "STANDARD-APPS INSTALLIEREN" -Action { Install-DefaultApps }
-                }
+                Invoke-MenuAction -Title "STANDARD-APPS INSTALLIEREN" -Action { Install-DefaultApps } -NoWait
             }
             "3" {
-                if (Confirm-Action -Message "Verfuegbare Windows Updates jetzt installieren?") {
-                    Invoke-MenuAction -Title "WINDOWS UPDATES" -Action { Install-Updates }
-                }
+                Invoke-MenuAction -Title "WINDOWS UPDATES" -Action { Install-Updates } -NoWait
             }
             "4" {
-                if (Confirm-Action -Message "Verknuepfungen aus Taskleiste und Startmenue entfernen?") {
-                    Invoke-MenuAction -Title "TASKLEISTE UND STARTMENUE BEREINIGEN" -Action {
-                        Remove-ApplicationsTaskbar
-                        Remove-ApplicationsStartMenu
-                    }
-                }
+                Invoke-MenuAction -Title "TASKLEISTE UND STARTMENUE BEREINIGEN" -Action {
+                    Remove-ApplicationsTaskbar
+                    Remove-ApplicationsStartMenu
+                } -NoWait
             }
-            "5" { Show-PowerMenu }
+            "5" {
+                Show-PowerMenu
+            }
             "6" {
-                Invoke-MenuAction -Title ".NET FRAMEWORK 3.5" -Action { Install-NetFramework35 }
+                Invoke-MenuAction -Title ".NET FRAMEWORK 3.5" -Action { Install-NetFramework35 } -NoWait
             }
         }
-    } while ($choice -ne "0")
+
+        Write-Banner -NoClear
+        Write-Section -Title "AUSWAHL ABGESCHLOSSEN"
+        Write-Host ""
+        Write-Status -Type Success -Message "Alle ausgewaehlten Aktionen wurden der Reihe nach verarbeitet."
+        Wait-ForUser
+    } while ($true)
 }
 
 Write-Banner

@@ -15,6 +15,17 @@ Das nummerierte Menue bietet:
 - .NET Framework 3.5 installieren
 - Energy Center mit drei Profilen und individuellen Einstellungen
 
+Im Hauptmenue koennen mehrere Aktionen auf einmal ausgewaehlt werden, zum Beispiel
+`1,2,4,6`. Die Aktionen laufen danach in der angezeigten Menue-Reihenfolge. Mit
+`alle` oder `a` werden alle automatischen Aktionen gestartet; das interaktive
+Energy Center bleibt davon ausgenommen.
+
+Beim HP-Debloat werden Store-Apps, provisionierte Pakete und klassische
+Desktop-Programme in mehreren Durchlaeufen entfernt. Danach werden verwaiste
+HP-Dienste, Aufgaben, Verknuepfungen und Produktordner bereinigt. HP Support
+Assistant sowie seine Support-Framework-Komponenten bleiben erhalten. Treiber,
+Firmware und BIOS-Komponenten werden aus Sicherheitsgruenden nicht entfernt.
+
 Im Energy Center lassen sich Netz- und Akkubetrieb getrennt konfigurieren:
 - Bildschirm-, Standby-, Ruhezustand- und Festplatten-Zeitlimits
 - Prozessor-Minimum und -Maximum
