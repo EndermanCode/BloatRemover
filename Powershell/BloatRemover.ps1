@@ -51,6 +51,7 @@ $pathStartmenu = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\"
 $ErrorActionPreference = 'Continue'
 $script:CustomConfigExecuted = $false
 $script:LastCustomConfigSucceeded = $false
+$CurrentConfigSchemaVersion = 4
 $ScriptDirectory = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) { $PSScriptRoot } else { (Get-Location).Path }
 
 function Test-Yes {
@@ -1267,7 +1268,7 @@ function New-CustomInstallConfig {
     }
 
     $config = [ordered]@{
-        schemaVersion = 4
+        schemaVersion = $CurrentConfigSchemaVersion
         name = $configName
         createdAt = (Get-Date).ToString('o')
         startupMode = $startupMode
@@ -1294,6 +1295,212 @@ function New-CustomInstallConfig {
     if ($actions | Where-Object { $_.Action -eq 'replaceFile' -and $_.CopyToConfig }) {
         Write-Status -Type Success -Message "Die Quelldateien wurden portabel in den Unterordner 'Files' kopiert."
     }
+}
+
+function Get-CustomConfigSchemaVersion {
+    param([Parameter(Mandatory)]$Config)
+
+    $version = 0
+    if (-not [int]::TryParse([string]$Config.schemaVersion, [ref]$version) -or $version -lt 1) {
+        return 1
+    }
+    return $version
+}
+
+function Get-CustomConfigFileSchemaVersion {
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        $config = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        return (Get-CustomConfigSchemaVersion -Config $config)
+    }
+    catch {
+        return 0
+    }
+}
+
+function Convert-CustomConfigToCurrentSchema {
+    param([Parameter(Mandatory)]$Config)
+
+    $sourceActions = @()
+    if ($Config.PSObject.Properties.Name -contains 'actions') {
+        $sourceActions = @($Config.actions | Where-Object { $null -ne $_ })
+    }
+    if ($sourceActions.Count -eq 0 -and ($Config.PSObject.Properties.Name -contains 'applications')) {
+        $sourceActions = @($Config.applications | Where-Object { $null -ne $_ })
+    }
+
+    $migratedActions = [System.Collections.Generic.List[object]]::new()
+    foreach ($action in $sourceActions) {
+        $actionMode = ([string]$action.action).ToLowerInvariant()
+        if ([string]::IsNullOrWhiteSpace($actionMode)) { $actionMode = 'install' }
+        $canonicalActionMode = if ($actionMode -eq 'replacefile') { 'replaceFile' } elseif ($actionMode -eq 'runtask') { 'runTask' } else { $actionMode }
+        $action | Add-Member -NotePropertyName action -NotePropertyValue $canonicalActionMode -Force
+
+        $type = ([string]$action.type).ToLowerInvariant()
+        if ($actionMode -eq 'install') {
+            if ($type -eq 'winget') {
+                if ([string]::IsNullOrWhiteSpace([string]$action.source)) {
+                    $action | Add-Member -NotePropertyName source -NotePropertyValue 'winget' -Force
+                }
+                if ([string]::IsNullOrWhiteSpace([string]$action.detectName)) {
+                    $catalogMatch = $DefaultWingetPackages | Where-Object {
+                        ($action.id -and $_.Id -eq $action.id) -or ($action.matchName -and $_.Name -eq $action.matchName)
+                    } | Select-Object -First 1
+                    $detectName = if ($catalogMatch.DetectName) { $catalogMatch.DetectName } else { [string]$action.name }
+                    $action | Add-Member -NotePropertyName detectName -NotePropertyValue $detectName -Force
+                }
+            }
+            elseif ($type -in @('exe', 'msi')) {
+                if ([string]::IsNullOrWhiteSpace([string]$action.detectName)) {
+                    $action | Add-Member -NotePropertyName detectName -NotePropertyValue ([string]$action.name) -Force
+                }
+                if (@($action.successExitCodes).Count -eq 0) {
+                    $action | Add-Member -NotePropertyName successExitCodes -NotePropertyValue @(0, 1641, 3010) -Force
+                }
+            }
+        }
+        elseif ($actionMode -eq 'uninstall') {
+            if ($type -eq 'winget' -and [string]::IsNullOrWhiteSpace([string]$action.detectName)) {
+                $detectName = if ($action.matchName) { [string]$action.matchName } else { [string]$action.name }
+                $action | Add-Member -NotePropertyName detectName -NotePropertyValue $detectName -Force
+            }
+        }
+        elseif ($actionMode -eq 'replacefile') {
+            $action | Add-Member -NotePropertyName type -NotePropertyValue 'file' -Force
+            if (-not ($action.PSObject.Properties.Name -contains 'backupExisting')) {
+                $action | Add-Member -NotePropertyName backupExisting -NotePropertyValue $true
+            }
+            if (-not ($action.PSObject.Properties.Name -contains 'createDirectory')) {
+                $action | Add-Member -NotePropertyName createDirectory -NotePropertyValue $true
+            }
+        }
+        elseif ($actionMode -eq 'runtask') {
+            $action | Add-Member -NotePropertyName type -NotePropertyValue 'system' -Force
+        }
+        $migratedActions.Add($action)
+    }
+
+    $Config | Add-Member -NotePropertyName schemaVersion -NotePropertyValue $CurrentConfigSchemaVersion -Force
+    $Config | Add-Member -NotePropertyName startupMode -NotePropertyValue (Get-NormalizedStartupMode -Value ([string]$Config.startupMode)) -Force
+    $Config | Add-Member -NotePropertyName skipIfAlreadyApplied -NotePropertyValue ($Config.skipIfAlreadyApplied -eq $true) -Force
+    if (-not ($Config.PSObject.Properties.Name -contains 'restartExplorer')) {
+        $Config | Add-Member -NotePropertyName restartExplorer -NotePropertyValue $false
+    }
+    if (-not ($Config.PSObject.Properties.Name -contains 'energy')) {
+        $Config | Add-Member -NotePropertyName energy -NotePropertyValue $null
+    }
+    $Config | Add-Member -NotePropertyName actions -NotePropertyValue @($migratedActions) -Force
+    $Config | Add-Member -NotePropertyName modifiedAt -NotePropertyValue ((Get-Date).ToString('o')) -Force
+    if ($Config.PSObject.Properties.Name -contains 'applications') {
+        $Config.PSObject.Properties.Remove('applications')
+    }
+    return $Config
+}
+
+function Update-CustomConfigSchemaFile {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Write-Status -Type Error -Message "Config wurde nicht gefunden: $Path"
+        return $false
+    }
+    $resolvedPath = (Resolve-Path -LiteralPath $Path).Path
+    try {
+        $config = Get-Content -LiteralPath $resolvedPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        Write-Status -Type Error -Message "Config konnte nicht gelesen werden: $($_.Exception.Message)"
+        return $false
+    }
+
+    $oldVersion = Get-CustomConfigSchemaVersion -Config $config
+    if ($oldVersion -gt $CurrentConfigSchemaVersion) {
+        Write-Status -Type Error -Message "'$([IO.Path]::GetFileName($resolvedPath))' verwendet Schema v$oldVersion; dieses Skript kennt nur bis v$CurrentConfigSchemaVersion. Ein Downgrade wird nicht durchgefuehrt."
+        return $false
+    }
+    if ($oldVersion -eq $CurrentConfigSchemaVersion) {
+        Write-Status -Type Skip -Message "'$([IO.Path]::GetFileName($resolvedPath))' verwendet bereits Schema v$CurrentConfigSchemaVersion."
+        return $true
+    }
+
+    try {
+        $backupPath = "{0}.schema-v{1}-backup-{2}.bak" -f $resolvedPath, $oldVersion, (Get-Date -Format 'yyyyMMdd-HHmmssfff')
+        Copy-Item -LiteralPath $resolvedPath -Destination $backupPath -Force -ErrorAction Stop
+
+        $migratedConfig = Convert-CustomConfigToCurrentSchema -Config $config
+        $json = $migratedConfig | ConvertTo-Json -Depth 12
+        $null = $json | ConvertFrom-Json -ErrorAction Stop
+        $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+        $directory = Split-Path -Parent $resolvedPath
+        $temporaryPath = Join-Path $directory (".schema-upgrade-{0}.tmp" -f ([guid]::NewGuid()).ToString('N'))
+        $replaceBackupPath = $temporaryPath + '.replaced'
+        try {
+            [IO.File]::WriteAllText($temporaryPath, $json, $utf8WithoutBom)
+            try {
+                [IO.File]::Replace($temporaryPath, $resolvedPath, $replaceBackupPath, $true)
+            }
+            catch {
+                # Fallback fuer USB-Dateisysteme, die den atomaren ReplaceFile-Aufruf
+                # nicht unterstuetzen. Die externe .bak-Sicherung existiert bereits.
+                Copy-Item -LiteralPath $temporaryPath -Destination $resolvedPath -Force -ErrorAction Stop
+                Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        finally {
+            if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $replaceBackupPath -PathType Leaf) { Remove-Item -LiteralPath $replaceBackupPath -Force -ErrorAction SilentlyContinue }
+        }
+        Write-Status -Type Success -Message "'$([IO.Path]::GetFileName($resolvedPath))' wurde von Schema v$oldVersion auf v$CurrentConfigSchemaVersion aktualisiert."
+        Write-Status -Type Info -Message "Sicherung: $backupPath"
+        return $true
+    }
+    catch {
+        Write-Status -Type Error -Message "Schema-Upgrade von '$resolvedPath' ist fehlgeschlagen: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Update-CustomConfigSchemaInteractive {
+    $configs = @(Get-AvailableCustomConfigs)
+    Write-Banner
+    Write-Section -Title "JSON-SCHEMA UPGRADER"
+    Write-Host ""
+    Write-Status -Type Info -Message "Aktuelles Config-Schema: v$CurrentConfigSchemaVersion"
+
+    if ($configs.Count -gt 0) {
+        for ($index = 0; $index -lt $configs.Count; $index++) {
+            $version = Get-CustomConfigFileSchemaVersion -Path $configs[$index].FullName
+            Write-MenuItem -Key ([string]($index + 1)) -Label $configs[$index].BaseName -Hint "Schema v$version | $($configs[$index].DirectoryName)"
+        }
+        Write-MenuItem -Key "A" -Label "Alle gefundenen Configs upgraden"
+    }
+    else {
+        Write-Status -Type Warning -Message "Es wurden keine gueltigen Configs automatisch gefunden."
+    }
+    Write-MenuItem -Key "M" -Label "JSON-Pfad manuell eingeben"
+    Write-MenuItem -Key "0" -Label "Abbrechen"
+
+    do {
+        $choice = (Read-Host "  Auswahl").Trim()
+        if ($choice -eq '0') { return }
+        if ($choice -match '^(?i:a|alle)$' -and $configs.Count -gt 0) {
+            foreach ($configFile in $configs) { $null = Update-CustomConfigSchemaFile -Path $configFile.FullName }
+            return
+        }
+        if ($choice -match '^(?i:m|manuell)$') {
+            $manualPath = Read-RequiredValue -Prompt "Vollstaendiger Pfad zur JSON-Datei"
+            $null = Update-CustomConfigSchemaFile -Path $manualPath
+            return
+        }
+
+        $number = 0
+        if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $configs.Count) {
+            $null = Update-CustomConfigSchemaFile -Path $configs[$number - 1].FullName
+            return
+        }
+        Write-Status -Type Warning -Message "Ungueltige Auswahl."
+    } while ($true)
 }
 
 function Test-CustomConfigFile {
@@ -1450,6 +1657,8 @@ function Show-CustomConfigEditorState {
     Write-Host ""
     Write-Status -Type Info -Message "Datei: $Path"
     Write-Status -Type Info -Message "Profilname: $($Config.name)"
+    $schemaVersion = Get-CustomConfigSchemaVersion -Config $Config
+    Write-Status -Type Info -Message "Schema: v$schemaVersion $(if ($schemaVersion -lt $CurrentConfigSchemaVersion) { '(Upgrade verfuegbar)' } else { '(aktuell)' })"
     $startupMode = Get-NormalizedStartupMode -Value ([string]$Config.startupMode)
     Write-Status -Type Info -Message "Startverhalten: $(if ($startupMode -eq 'automatic') { 'Sofort automatisch' } else { 'Beim Fund nachfragen' })"
     Write-Status -Type Info -Message "Erledigte Aktionen ueberspringen: $(if ($Config.skipIfAlreadyApplied -eq $true) { 'Ja' } else { 'Nein' })"
@@ -1661,7 +1870,7 @@ function Save-CustomConfigObject {
         [Parameter(Mandatory)][string]$Path
     )
 
-    $Config | Add-Member -NotePropertyName schemaVersion -NotePropertyValue 4 -Force
+    $Config | Add-Member -NotePropertyName schemaVersion -NotePropertyValue $CurrentConfigSchemaVersion -Force
     $Config | Add-Member -NotePropertyName startupMode -NotePropertyValue (Get-NormalizedStartupMode -Value ([string]$Config.startupMode)) -Force
     $Config | Add-Member -NotePropertyName skipIfAlreadyApplied -NotePropertyValue ($Config.skipIfAlreadyApplied -eq $true) -Force
     $Config | Add-Member -NotePropertyName modifiedAt -NotePropertyValue ((Get-Date).ToString('o')) -Force
@@ -3184,11 +3393,12 @@ function Show-MainMenu {
         Write-MenuItem -Key "C" -Label "Custom-JSON ausfuehren" -Hint "danach vollstaendig ohne Rueckfragen"
         Write-MenuItem -Key "B" -Label "JSON Config Builder" -Hint "Profil lokal oder auf USB erstellen"
         Write-MenuItem -Key "E" -Label "JSON Config Editor" -Hint "Settings und Aktionen anzeigen/bearbeiten"
+        Write-MenuItem -Key "U" -Label "JSON-Schema upgraden" -Hint "eine oder alle Configs auf v$CurrentConfigSchemaVersion aktualisieren"
         Write-MenuItem -Key "0" -Label "Beenden"
         Write-Host ""
         Write-Status -Type Info -Message "Mehrfachauswahl mit Komma: z. B. 1,2,4,6"
 
-        $choices = @(Read-MultiMenuChoice -Prompt "Auswahl" -AllowedValues @("0", "1", "2", "3", "4", "5", "6", "7", "c", "b", "e") -AllValues @("1", "2", "3", "4", "5", "6", "7"))
+        $choices = @(Read-MultiMenuChoice -Prompt "Auswahl" -AllowedValues @("0", "1", "2", "3", "4", "5", "6", "7", "c", "b", "e", "u") -AllValues @("1", "2", "3", "4", "5", "6", "7"))
         if ($choices -contains "0") { break }
 
         if ($choices -contains "b") {
@@ -3201,6 +3411,10 @@ function Show-MainMenu {
         }
         if ($choices -contains "e") {
             Invoke-MenuAction -Title "JSON CONFIG EDITOR" -Action { Edit-CustomConfig }
+            continue
+        }
+        if ($choices -contains "u") {
+            Invoke-MenuAction -Title "JSON-SCHEMA UPGRADER" -Action { Update-CustomConfigSchemaInteractive }
             continue
         }
 

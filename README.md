@@ -36,7 +36,7 @@ werden.
 
 ## PowerShell JSON Config Builder
 
-Im Hauptmenue stehen zwei zusaetzliche Werkzeuge bereit:
+Im Hauptmenue stehen zusaetzliche JSON-Werkzeuge bereit:
 
 - `B`: Erstellt gefuehrt ein externes JSON-Profil und speichert es lokal oder
   unter `BloatRemoverConfigs` auf einem erkannten USB-Stick.
@@ -45,6 +45,16 @@ Im Hauptmenue stehen zwei zusaetzliche Werkzeuge bereit:
 - `E`: Oeffnet den Config Editor mit einer Uebersicht aller aktuellen Settings
   und Aktionen. Dort koennen Programme, Deinstallationen, Reihenfolge und
   Energieeinstellungen nachtraeglich bearbeitet werden.
+- `U`: Aktualisiert eine einzelne, manuell angegebene oder alle gefundenen
+  Configs auf das aktuell vom Skript unterstuetzte JSON-Schema.
+
+Der Schema-Upgrader migriert unter anderem alte `applications`-Listen nach
+`actions`, ergaenzt Startverhalten, Zielzustandspruefung, Erkennungsnamen und
+Standardwerte neuer Aktionstypen. Unbekannte eigene JSON-Felder bleiben erhalten.
+Vor jeder tatsaechlichen Aenderung wird neben der Config eine datierte
+`*.schema-vN-backup-*.bak`-Sicherung angelegt. Configs mit einer neueren, dem
+Skript unbekannten Schema-Version werden niemals heruntergestuft. Bereits aktuelle
+Dateien werden ohne neue Sicherung uebersprungen.
 
 Beim normalen Skriptstart werden gueltige Custom-Configs automatisch gesucht.
 Gefunden werden JSON-Dateien neben dem Skript, in lokalen `Configs`-Ordnern,
