@@ -177,7 +177,8 @@ function Select-WingetPackagesFallback {
 
     Write-Status -Type Warning -Message "Pfeiltasten-Auswahl ist in diesem Host nicht verfuegbar. Bitte Nummern eingeben."
     for ($index = 0; $index -lt $Packages.Count; $index++) {
-        Write-MenuItem -Key ([string]($index + 1)) -Label $Packages[$index].DisplayName -Hint $Packages[$index].Id
+        $detail = if ($Packages[$index].Detail) { $Packages[$index].Detail } elseif ($Packages[$index].Id) { $Packages[$index].Id } else { $Packages[$index].Name }
+        Write-MenuItem -Key ([string]($index + 1)) -Label $Packages[$index].DisplayName -Hint $detail
     }
 
     do {
@@ -211,27 +212,52 @@ function Select-WingetPackages {
 
     $selected = New-Object bool[] $Packages.Count
     $currentIndex = 0
+    $scrollOffset = 0
     $listTop = 0
+    $viewportSize = 0
     $originalCursorVisible = $true
 
     try {
         $originalCursorVisible = [Console]::CursorVisible
         [Console]::CursorVisible = $false
         Write-Host ""
-        Write-Status -Type Info -Message "Pfeiltasten: bewegen | Leertaste: ankreuzen | A: alle | Enter: uebernehmen | Esc: abbrechen"
-        $listTop = [Console]::CursorTop
+        Write-Status -Type Info -Message "Pfeile/Bild: scrollen | Pos1/Ende | Leertaste: ankreuzen | A: alle | Enter: uebernehmen | Esc: abbrechen"
+
+        # Der Bereich wird vorab reserviert. Dadurch bleibt auch bei langen Listen
+        # jede Zeile innerhalb des sichtbaren Konsolenfensters.
+        $viewportSize = [Math]::Min($Packages.Count, [Math]::Max(3, [Console]::WindowHeight - 6))
+        for ($row = 0; $row -le $viewportSize; $row++) { Write-Host "" }
+        $listTop = [Console]::CursorTop - ($viewportSize + 1)
 
         while ($true) {
             $width = [Math]::Max(20, [Console]::WindowWidth - 1)
-            for ($index = 0; $index -lt $Packages.Count; $index++) {
+            if ($currentIndex -lt $scrollOffset) { $scrollOffset = $currentIndex }
+            if ($currentIndex -ge ($scrollOffset + $viewportSize)) {
+                $scrollOffset = $currentIndex - $viewportSize + 1
+            }
+
+            for ($row = 0; $row -lt $viewportSize; $row++) {
+                $index = $scrollOffset + $row
+                if ($index -ge $Packages.Count) {
+                    [Console]::SetCursorPosition(0, $listTop + $row)
+                    [Console]::Write(('').PadRight($width))
+                    continue
+                }
                 $cursor = if ($index -eq $currentIndex) { '>' } else { ' ' }
                 $check = if ($selected[$index]) { '[x]' } else { '[ ]' }
-                $identifier = if ($Packages[$index].Id) { $Packages[$index].Id } else { $Packages[$index].Name }
+                $identifier = if ($Packages[$index].Detail) { $Packages[$index].Detail } elseif ($Packages[$index].Id) { $Packages[$index].Id } else { $Packages[$index].Name }
                 $line = " $cursor $check $($Packages[$index].DisplayName)  [$identifier]"
                 if ($line.Length -gt $width) { $line = $line.Substring(0, $width) }
-                [Console]::SetCursorPosition(0, $listTop + $index)
+                [Console]::SetCursorPosition(0, $listTop + $row)
                 [Console]::Write($line.PadRight($width))
             }
+
+            $lastVisible = [Math]::Min($Packages.Count, $scrollOffset + $viewportSize)
+            $markedCount = @($selected | Where-Object { $_ }).Count
+            $statusLine = "   Angezeigt: $($scrollOffset + 1)-$lastVisible von $($Packages.Count) | Markiert: $markedCount"
+            if ($statusLine.Length -gt $width) { $statusLine = $statusLine.Substring(0, $width) }
+            [Console]::SetCursorPosition(0, $listTop + $viewportSize)
+            [Console]::Write($statusLine.PadRight($width))
 
             $key = [Console]::ReadKey($true)
             switch ($key.Key) {
@@ -241,6 +267,14 @@ function Select-WingetPackages {
                 'DownArrow' {
                     $currentIndex = if ($currentIndex -ge ($Packages.Count - 1)) { 0 } else { $currentIndex + 1 }
                 }
+                'PageUp' {
+                    $currentIndex = [Math]::Max(0, $currentIndex - $viewportSize)
+                }
+                'PageDown' {
+                    $currentIndex = [Math]::Min($Packages.Count - 1, $currentIndex + $viewportSize)
+                }
+                'Home' { $currentIndex = 0 }
+                'End' { $currentIndex = $Packages.Count - 1 }
                 'Spacebar' {
                     $selected[$currentIndex] = -not $selected[$currentIndex]
                 }
@@ -249,21 +283,21 @@ function Select-WingetPackages {
                     for ($index = 0; $index -lt $selected.Count; $index++) { $selected[$index] = $selectAll }
                 }
                 'Enter' {
-                    [Console]::SetCursorPosition(0, $listTop + $Packages.Count)
+                    [Console]::SetCursorPosition(0, $listTop + $viewportSize + 1)
                     $result = for ($index = 0; $index -lt $Packages.Count; $index++) {
                         if ($selected[$index]) { $Packages[$index] }
                     }
                     return @($result)
                 }
                 'Escape' {
-                    [Console]::SetCursorPosition(0, $listTop + $Packages.Count)
+                    [Console]::SetCursorPosition(0, $listTop + $viewportSize + 1)
                     return @()
                 }
             }
         }
     }
     catch {
-        try { [Console]::SetCursorPosition(0, $listTop + $Packages.Count) } catch {}
+        try { [Console]::SetCursorPosition(0, $listTop + $viewportSize + 1) } catch {}
         return @(Select-WingetPackagesFallback -Packages $Packages)
     }
     finally {
@@ -432,6 +466,166 @@ function Uninstall-StoreAppPackage {
 
     if ($errors.Count -gt 0) {
         throw ($errors -join ' | ')
+    }
+}
+
+function Get-DesktopUninstallRegistryRoots {
+    $roots = [System.Collections.Generic.List[string]]::new()
+    $roots.Add('Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*')
+    $roots.Add('Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')
+    $roots.Add('Registry::HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*')
+
+    foreach ($sid in @(Get-ChildItem -Path 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue |
+        Where-Object { $_.PSChildName -match '^S-1-5-21-' } |
+        Select-Object -ExpandProperty PSChildName)) {
+        $roots.Add("Registry::HKEY_USERS\$sid\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*")
+        $roots.Add("Registry::HKEY_USERS\$sid\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*")
+    }
+    @($roots | Sort-Object -Unique)
+}
+
+function Get-InstalledDesktopPrograms {
+    $programs = foreach ($root in @(Get-DesktopUninstallRegistryRoots)) {
+        Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
+            Where-Object {
+                -not [string]::IsNullOrWhiteSpace([string]$_.DisplayName) -and
+                (-not [string]::IsNullOrWhiteSpace([string]$_.QuietUninstallString) -or
+                    -not [string]::IsNullOrWhiteSpace([string]$_.UninstallString)) -and
+                [int]$_.SystemComponent -ne 1 -and
+                [int]$_.NoRemove -ne 1 -and
+                [string]$_.ReleaseType -notmatch '^(?i:Hotfix|Update|Security Update)$' -and
+                -not (Test-HPProtectedComponent -Name "$($_.DisplayName) $($_.PSChildName)")
+            }
+    }
+
+    @(
+        $programs |
+            Group-Object DisplayName |
+            ForEach-Object {
+                $program = $_.Group | Sort-Object DisplayVersion -Descending | Select-Object -First 1
+                $details = @(
+                    [string]$program.Publisher
+                    $(if ($program.DisplayVersion) { "Version $($program.DisplayVersion)" })
+                ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+                [pscustomobject]@{
+                    DisplayName = [string]$program.DisplayName
+                    Id = [string]$program.DisplayName
+                    Name = $null
+                    Detail = ($details -join ' | ')
+                    MatchName = [string]$program.DisplayName
+                }
+            } |
+            Sort-Object DisplayName
+    )
+}
+
+function Add-DesktopProgramUninstallSelections {
+    param([Parameter(Mandatory)]$Actions)
+
+    Write-Host ""
+    Write-Status -Type Info -Message "Programme aus 'Systemsteuerung > Programme und Features' werden ermittelt..."
+    $programs = @(Get-InstalledDesktopPrograms)
+    if ($programs.Count -eq 0) {
+        Write-Status -Type Warning -Message "Es wurden keine deinstallierbaren Desktop-Programme gefunden."
+        return
+    }
+
+    $selectedPrograms = @(Select-WingetPackages -Packages $programs)
+    if ($selectedPrograms.Count -eq 0) {
+        Write-Status -Type Info -Message "Keine Desktop-Programme ausgewaehlt."
+        return
+    }
+
+    $addedCount = 0
+    foreach ($program in $selectedPrograms) {
+        $duplicate = @($Actions | Where-Object {
+            $_.action -eq 'uninstall' -and $_.type -eq 'registry' -and $_.matchName -eq $program.MatchName
+        }).Count -gt 0
+        if ($duplicate) { continue }
+
+        $Actions.Add([pscustomobject][ordered]@{
+            action = 'uninstall'
+            name = $program.DisplayName
+            type = 'registry'
+            matchName = $program.MatchName
+        })
+        $addedCount++
+    }
+    Write-Status -Type Success -Message "$addedCount Desktop-Programm(e) wurden zur Deinstallation vorgemerkt."
+}
+
+function Invoke-DesktopProgramUninstall {
+    param([Parameter(Mandatory)]$Program)
+
+    $displayName = [string]$Program.DisplayName
+    $command = [string]$Program.QuietUninstallString
+    $productCode = if ([string]$Program.PSChildName -match '^\{[0-9A-Fa-f-]{36}\}$') { [string]$Program.PSChildName } else { $null }
+
+    if ($productCode) {
+        $filePath = 'msiexec.exe'
+        $arguments = "/x $productCode /qn /norestart"
+    }
+    else {
+        if ([string]::IsNullOrWhiteSpace($command)) { $command = [string]$Program.UninstallString }
+        if ([string]::IsNullOrWhiteSpace($command)) { throw "Kein Deinstallationsbefehl fuer '$displayName' gefunden." }
+
+        if ($command -match '(?i)msiexec(?:\.exe)?\s+.*?(\{[0-9A-F-]{36}\})') {
+            $filePath = 'msiexec.exe'
+            $arguments = "/x $($Matches[1]) /qn /norestart"
+        }
+        else {
+            if ($command -notmatch '(?i)(/quiet|/qn|/silent|/verysilent|/s(?:\s|$)|--silent)') {
+                if ($command -match '(?i)\\unins\d*\.exe(?:"|\s|$)') {
+                    $command += ' /VERYSILENT /SUPPRESSMSGBOXES /NORESTART'
+                }
+                elseif ($command -match '(?i)\\uninstall\.exe(?:"|\s|$)') {
+                    $command += ' /S'
+                }
+                else {
+                    $command += ' /quiet /norestart'
+                }
+            }
+            $filePath = "$env:SystemRoot\System32\cmd.exe"
+            $arguments = @('/d', '/s', '/c', $command)
+        }
+    }
+
+    Write-Host "  Deinstalliere Desktop-Programm: $displayName"
+    $process = Start-Process -FilePath $filePath -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
+    if ($process.ExitCode -notin @(0, 1605, 1614, 1641, 3010)) {
+        throw "Deinstallation von '$displayName' endete mit Exitcode $($process.ExitCode)."
+    }
+}
+
+function Uninstall-DesktopProgramByName {
+    param([Parameter(Mandatory)][string]$MatchName)
+
+    if (Test-HPProtectedComponent -Name $MatchName) {
+        throw "HP Support Assistant und seine Support-Komponenten duerfen nicht entfernt werden."
+    }
+
+    $rawMatches = @(
+        foreach ($root in @(Get-DesktopUninstallRegistryRoots)) {
+            Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
+                Where-Object { [string]$_.DisplayName -eq $MatchName }
+        }
+    )
+    $matches = @(
+        $rawMatches |
+            Group-Object {
+                $command = if ($_.QuietUninstallString) { $_.QuietUninstallString } else { $_.UninstallString }
+                "$($_.PSChildName)|$command"
+            } |
+            ForEach-Object { $_.Group | Select-Object -First 1 }
+    )
+
+    if ($matches.Count -eq 0) {
+        Write-Status -Type Info -Message "Desktop-Programm '$MatchName' ist bereits nicht mehr installiert."
+        return
+    }
+
+    foreach ($program in $matches) {
+        Invoke-DesktopProgramUninstall -Program $program
     }
 }
 
@@ -609,7 +803,7 @@ function New-CustomInstallConfig {
     Write-Banner
     Write-Section -Title "JSON CONFIG BUILDER"
     Write-Host ""
-    Write-Status -Type Info -Message "Unterstuetzt werden WinGet-Pakete, Store-App-Deinstallationen sowie lokale oder freigegebene EXE-/MSI-Installer."
+    Write-Status -Type Info -Message "Unterstuetzt werden WinGet-Pakete, Store- und Desktop-Deinstallationen sowie lokale oder freigegebene EXE-/MSI-Installer."
     Write-Status -Type Info -Message "EXE-Parameter muessen zum jeweiligen Hersteller-Installer passen."
     Write-Host ""
 
@@ -624,8 +818,9 @@ function New-CustomInstallConfig {
         Write-MenuItem -Key "3" -Label "MSI-Installer ausfuehren"
         Write-MenuItem -Key "4" -Label "Programm deinstallieren" -Hint "per WinGet-ID oder exaktem Programmnamen"
         Write-MenuItem -Key "5" -Label "Store-Apps deinstallieren" -Hint "installierte Apps per Checkliste auswaehlen"
+        Write-MenuItem -Key "6" -Label "Programme und Features deinstallieren" -Hint "klassische Desktop-Programme per Checkliste"
         Write-MenuItem -Key "0" -Label "Builder abschliessen"
-        $typeChoice = Read-MenuChoice -Prompt "Aktion" -AllowedValues @("0", "1", "2", "3", "4", "5")
+        $typeChoice = Read-MenuChoice -Prompt "Aktion" -AllowedValues @("0", "1", "2", "3", "4", "5", "6")
         if ($typeChoice -eq "0") { break }
 
         if ($typeChoice -eq "1") {
@@ -669,6 +864,13 @@ function New-CustomInstallConfig {
             continue
         }
 
+        if ($typeChoice -eq "6") {
+            Add-DesktopProgramUninstallSelections -Actions $actions
+            $continueAnswer = Read-Host "  Weitere Aktion hinzufuegen? [J/n]"
+            if ($continueAnswer -match '^(?i:n|nein|no)$') { break }
+            continue
+        }
+
         $displayName = Read-RequiredValue -Prompt "Anzeigename der Aktion"
         if ($typeChoice -eq "4") {
             Write-MenuItem -Key "1" -Label "Ueber exakte WinGet-ID suchen"
@@ -677,6 +879,14 @@ function New-CustomInstallConfig {
             if ($matchChoice -eq "1") {
                 $uninstallId = Read-RequiredValue -Prompt "Exakte WinGet-ID"
                 $uninstallName = $null
+            }
+            elseif ($action.Type -eq 'registry') {
+                $serializedActions.Add([ordered]@{
+                    action = 'uninstall'
+                    name = $action.Name
+                    type = 'registry'
+                    matchName = $action.MatchName
+                })
             }
             else {
                 $uninstallId = $null
@@ -1046,10 +1256,11 @@ function Edit-CustomConfig {
         Write-MenuItem -Key "4" -Label "WinGet-Pakete hinzufuegen"
         Write-MenuItem -Key "5" -Label "Desktop-Programm deinstallieren" -Hint "WinGet"
         Write-MenuItem -Key "6" -Label "Store-Apps deinstallieren" -Hint "installierte Apps per Checkliste"
-        Write-MenuItem -Key "7" -Label "EXE/MSI-Installer hinzufuegen"
-        Write-MenuItem -Key "8" -Label "Aktion bearbeiten"
-        Write-MenuItem -Key "9" -Label "Aktion entfernen"
-        Write-MenuItem -Key "10" -Label "Aktionsreihenfolge aendern"
+        Write-MenuItem -Key "7" -Label "Programme und Features deinstallieren" -Hint "Desktop-Programme per Checkliste"
+        Write-MenuItem -Key "8" -Label "EXE/MSI-Installer hinzufuegen"
+        Write-MenuItem -Key "9" -Label "Aktion bearbeiten"
+        Write-MenuItem -Key "10" -Label "Aktion entfernen"
+        Write-MenuItem -Key "11" -Label "Aktionsreihenfolge aendern"
         Write-MenuItem -Key "S" -Label "Speichern und Editor schliessen"
         Write-MenuItem -Key "0" -Label "Ohne Speichern schliessen"
         $choice = (Read-Host "  Auswahl").Trim().ToLowerInvariant()
@@ -1098,6 +1309,9 @@ function Edit-CustomConfig {
                 Add-StoreAppUninstallSelections -Actions $actions
             }
             "7" {
+                Add-DesktopProgramUninstallSelections -Actions $actions
+            }
+            "8" {
                 $installerChoice = Read-MenuChoice -Prompt "1 = EXE, 2 = MSI" -AllowedValues @("1", "2")
                 $type = if ($installerChoice -eq "1") { 'exe' } else { 'msi' }
                 $name = Read-RequiredValue -Prompt "Anzeigename"
@@ -1127,7 +1341,7 @@ function Edit-CustomConfig {
                     arguments = $arguments; sha256 = $hash; successExitCodes = @(0, 1641, 3010)
                 })
             }
-            "8" {
+            "9" {
                 $index = Select-CustomActionIndex -Actions @($actions) -Prompt "Aktion bearbeiten"
                 if ($index -ge 0) {
                     $action = $actions[$index]
@@ -1157,11 +1371,11 @@ function Edit-CustomConfig {
                     }
                 }
             }
-            "9" {
+            "10" {
                 $index = Select-CustomActionIndex -Actions @($actions) -Prompt "Aktion entfernen"
                 if ($index -ge 0) { $actions.RemoveAt($index) }
             }
-            "10" {
+            "11" {
                 $index = Select-CustomActionIndex -Actions @($actions) -Prompt "Aktion verschieben"
                 if ($index -ge 0) {
                     $direction = Read-MenuChoice -Prompt "1 = nach oben, 2 = nach unten" -AllowedValues @("1", "2")
@@ -1293,6 +1507,9 @@ function Install-CustomConfig {
                 $type = ([string]$action.type).ToLowerInvariant()
                 if ($type -eq 'appx') {
                     Uninstall-StoreAppPackage -PackageName ([string]$action.packageName) -PackageFamilyName ([string]$action.packageFamilyName)
+                }
+                elseif ($type -eq 'registry') {
+                    Uninstall-DesktopProgramByName -MatchName ([string]$action.matchName)
                 }
                 elseif ($type -eq 'winget' -or [string]::IsNullOrWhiteSpace($type)) {
                     Uninstall-WingetPackage -Id ([string]$action.id) -Name ([string]$action.matchName)

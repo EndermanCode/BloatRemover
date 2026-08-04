@@ -58,12 +58,18 @@ werden im Builder und Editor direkt aus einer Checkliste der auf dem PC installi
 entfernbaren Apps gewaehlt. Die Auswahl entfernt auch ein passendes provisioniertes
 Paket, damit die App nicht bei einem neuen Benutzer erneut auftaucht. Windows-Kernpakete,
 Frameworks, Microsoft Store, App Installer und HP Support Assistant werden nicht angeboten.
+Klassische Programme aus `Systemsteuerung > Programme und Features` stehen ebenfalls
+als Checkliste bereit. Das Profil speichert deren Anzeigenamen und ermittelt den aktuellen
+Deinstallationsbefehl erst auf dem jeweiligen Ziel-PC. MSI-Pakete und bekannte Uninstaller
+werden dabei mit stillen Parametern gestartet.
 EXE/MSI-Dateien
 koennen in den portablen Unterordner `Installers` kopiert werden. Dabei werden
 relative Pfade und eine SHA-256-Pruefsumme in der JSON-Datei gespeichert.
 WinGet-Pakete werden im Builder aus einer fertigen Checkliste gewaehlt: mit den
 Pfeiltasten navigieren, mit der Leertaste markieren und mit Enter uebernehmen.
 Die WinGet-IDs muessen dabei nicht manuell gesucht oder eingegeben werden.
+Lange Checklisten scrollen automatisch; Bild auf/ab, Pos1 und Ende werden ebenfalls
+unterstuetzt. Unter der Liste werden sichtbarer Bereich und Anzahl der Markierungen angezeigt.
 
 Der Energieblock eines Profils unterstuetzt die Profile Energiesparend,
 Ausgeglichen und Leistung, eigene Zeitlimits fuer Netz- und Akkubetrieb sowie
