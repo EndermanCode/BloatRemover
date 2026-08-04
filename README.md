@@ -47,6 +47,9 @@ Profile koennen WinGet-, EXE- und MSI-Installationen sowie Deinstallationen per
 exakter WinGet-ID oder installiertem Programmnamen enthalten. EXE/MSI-Dateien
 koennen in den portablen Unterordner `Installers` kopiert werden. Dabei werden
 relative Pfade und eine SHA-256-Pruefsumme in der JSON-Datei gespeichert.
+WinGet-Pakete werden im Builder aus einer fertigen Checkliste gewaehlt: mit den
+Pfeiltasten navigieren, mit der Leertaste markieren und mit Enter uebernehmen.
+Die WinGet-IDs muessen dabei nicht manuell gesucht oder eingegeben werden.
 
 Fuer einen komplett unbeaufsichtigten Start kann die JSON-Datei direkt als
 Parameter uebergeben werden:

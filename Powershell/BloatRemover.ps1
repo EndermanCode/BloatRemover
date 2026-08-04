@@ -170,6 +170,105 @@ function Show-WingetPackageList {
     }
 }
 
+function Select-WingetPackagesFallback {
+    param([Parameter(Mandatory)][object[]]$Packages)
+
+    Write-Status -Type Warning -Message "Pfeiltasten-Auswahl ist in diesem Host nicht verfuegbar. Bitte Nummern eingeben."
+    for ($index = 0; $index -lt $Packages.Count; $index++) {
+        Write-MenuItem -Key ([string]($index + 1)) -Label $Packages[$index].DisplayName -Hint $Packages[$index].Id
+    }
+
+    do {
+        $rawSelection = (Read-Host "  Pakete (z. B. 1,3,5 oder alle; 0 = Abbrechen)").Trim()
+        if ($rawSelection -eq '0') { return @() }
+        if ($rawSelection -match '^(?i:a|all|alle)$') { return @($Packages) }
+
+        $selected = [System.Collections.Generic.List[object]]::new()
+        $invalid = $false
+        foreach ($part in @($rawSelection -split '[,;\s]+' | Where-Object { $_ })) {
+            $number = 0
+            if (-not [int]::TryParse($part, [ref]$number) -or $number -lt 1 -or $number -gt $Packages.Count) {
+                $invalid = $true
+                break
+            }
+            $package = $Packages[$number - 1]
+            if (-not $selected.Contains($package)) { $selected.Add($package) }
+        }
+        if (-not $invalid -and $selected.Count -gt 0) { return @($selected) }
+        Write-Status -Type Warning -Message "Ungueltige Paketauswahl."
+    } while ($true)
+}
+
+function Select-WingetPackages {
+    param([object[]]$Packages = $DefaultWingetPackages)
+
+    if ($Packages.Count -eq 0) { return @() }
+    if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
+        return @(Select-WingetPackagesFallback -Packages $Packages)
+    }
+
+    $selected = New-Object bool[] $Packages.Count
+    $currentIndex = 0
+    $listTop = 0
+    $originalCursorVisible = $true
+
+    try {
+        $originalCursorVisible = [Console]::CursorVisible
+        [Console]::CursorVisible = $false
+        Write-Host ""
+        Write-Status -Type Info -Message "Pfeiltasten: bewegen | Leertaste: ankreuzen | A: alle | Enter: uebernehmen | Esc: abbrechen"
+        $listTop = [Console]::CursorTop
+
+        while ($true) {
+            $width = [Math]::Max(20, [Console]::WindowWidth - 1)
+            for ($index = 0; $index -lt $Packages.Count; $index++) {
+                $cursor = if ($index -eq $currentIndex) { '>' } else { ' ' }
+                $check = if ($selected[$index]) { '[x]' } else { '[ ]' }
+                $identifier = if ($Packages[$index].Id) { $Packages[$index].Id } else { $Packages[$index].Name }
+                $line = " $cursor $check $($Packages[$index].DisplayName)  [$identifier]"
+                if ($line.Length -gt $width) { $line = $line.Substring(0, $width) }
+                [Console]::SetCursorPosition(0, $listTop + $index)
+                [Console]::Write($line.PadRight($width))
+            }
+
+            $key = [Console]::ReadKey($true)
+            switch ($key.Key) {
+                'UpArrow' {
+                    $currentIndex = if ($currentIndex -le 0) { $Packages.Count - 1 } else { $currentIndex - 1 }
+                }
+                'DownArrow' {
+                    $currentIndex = if ($currentIndex -ge ($Packages.Count - 1)) { 0 } else { $currentIndex + 1 }
+                }
+                'Spacebar' {
+                    $selected[$currentIndex] = -not $selected[$currentIndex]
+                }
+                'A' {
+                    $selectAll = $selected -contains $false
+                    for ($index = 0; $index -lt $selected.Count; $index++) { $selected[$index] = $selectAll }
+                }
+                'Enter' {
+                    [Console]::SetCursorPosition(0, $listTop + $Packages.Count)
+                    $result = for ($index = 0; $index -lt $Packages.Count; $index++) {
+                        if ($selected[$index]) { $Packages[$index] }
+                    }
+                    return @($result)
+                }
+                'Escape' {
+                    [Console]::SetCursorPosition(0, $listTop + $Packages.Count)
+                    return @()
+                }
+            }
+        }
+    }
+    catch {
+        try { [Console]::SetCursorPosition(0, $listTop + $Packages.Count) } catch {}
+        return @(Select-WingetPackagesFallback -Packages $Packages)
+    }
+    finally {
+        try { [Console]::CursorVisible = $originalCursorVisible } catch {}
+    }
+}
+
 function Read-RequiredValue {
     param([Parameter(Mandatory)][string]$Prompt)
 
@@ -254,13 +353,47 @@ function New-CustomInstallConfig {
     do {
         Write-Host ""
         Write-Section -Title "AKTION HINZUFUEGEN"
-        Write-MenuItem -Key "1" -Label "WinGet-Paket installieren"
+        Write-MenuItem -Key "1" -Label "WinGet-Pakete aus Liste auswaehlen"
         Write-MenuItem -Key "2" -Label "EXE-Installer ausfuehren"
         Write-MenuItem -Key "3" -Label "MSI-Installer ausfuehren"
         Write-MenuItem -Key "4" -Label "Programm deinstallieren" -Hint "per WinGet-ID oder exaktem Programmnamen"
         Write-MenuItem -Key "0" -Label "Builder abschliessen"
         $typeChoice = Read-MenuChoice -Prompt "Aktion" -AllowedValues @("0", "1", "2", "3", "4")
         if ($typeChoice -eq "0") { break }
+
+        if ($typeChoice -eq "1") {
+            $selectedPackages = @(Select-WingetPackages)
+            if ($selectedPackages.Count -eq 0) {
+                Write-Status -Type Info -Message "Keine WinGet-Pakete ausgewaehlt."
+                continue
+            }
+
+            $addedCount = 0
+            foreach ($package in $selectedPackages) {
+                $alreadyAdded = @($actions | Where-Object {
+                    $_.Action -eq 'install' -and $_.Type -eq 'winget' -and
+                    (($_.Id -and $_.Id -eq $package.Id) -or ($_.MatchName -and $_.MatchName -eq $package.Name))
+                }).Count -gt 0
+                if ($alreadyAdded) { continue }
+
+                $actions.Add([pscustomobject]@{
+                    Action = "install"
+                    Name = $package.DisplayName
+                    Type = "winget"
+                    Id = $package.Id
+                    MatchName = $package.Name
+                    Source = $package.Source
+                    SourcePath = $null
+                    Arguments = $null
+                    CopyToConfig = $false
+                })
+                $addedCount++
+            }
+            Write-Status -Type Success -Message "$addedCount WinGet-Paket(e) wurden vorgemerkt."
+            $continueAnswer = Read-Host "  Weitere Aktion hinzufuegen? [J/n]"
+            if ($continueAnswer -match '^(?i:n|nein|no)$') { break }
+            continue
+        }
 
         $displayName = Read-RequiredValue -Prompt "Anzeigename der Aktion"
         if ($typeChoice -eq "4") {
@@ -282,22 +415,6 @@ function New-CustomInstallConfig {
                 Id = $uninstallId
                 MatchName = $uninstallName
                 Source = $null
-                SourcePath = $null
-                Arguments = $null
-                CopyToConfig = $false
-            })
-        }
-        elseif ($typeChoice -eq "1") {
-            $packageId = Read-RequiredValue -Prompt "Exakte WinGet-ID, z. B. 7zip.7zip"
-            $source = (Read-Host "  WinGet-Quelle [winget]").Trim()
-            if ([string]::IsNullOrWhiteSpace($source)) { $source = "winget" }
-            $actions.Add([pscustomobject]@{
-                Action = "install"
-                Name = $displayName
-                Type = "winget"
-                Id = $packageId
-                MatchName = $null
-                Source = $source
                 SourcePath = $null
                 Arguments = $null
                 CopyToConfig = $false
@@ -368,6 +485,7 @@ function New-CustomInstallConfig {
                 name = $action.Name
                 type = 'winget'
                 id = $action.Id
+                matchName = $action.MatchName
                 source = $action.Source
             })
             continue
