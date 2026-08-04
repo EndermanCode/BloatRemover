@@ -3,6 +3,13 @@
   "name": "Beispiel-SAP-Arbeitsplatz",
   "createdAt": "2026-08-04T00:00:00.0000000+02:00",
   "restartExplorer": false,
+  "energy": {
+    "preset": "Balanced",
+    "timeouts": null,
+    "fastStartup": "disabled",
+    "hibernation": "unchanged",
+    "usbPowerSaving": "enabled"
+  },
   "actions": [
     {
       "action": "uninstall",

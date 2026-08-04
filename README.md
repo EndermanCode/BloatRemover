@@ -42,6 +42,15 @@ Im Hauptmenue stehen zwei zusaetzliche Werkzeuge bereit:
   unter `BloatRemoverConfigs` auf einem erkannten USB-Stick.
 - `C`: Waehlt ein vorhandenes JSON-Profil aus und fuehrt danach alle enthaltenen
   Aktionen ohne weitere Rueckfragen aus.
+- `E`: Oeffnet den Config Editor mit einer Uebersicht aller aktuellen Settings
+  und Aktionen. Dort koennen Programme, Deinstallationen, Reihenfolge und
+  Energieeinstellungen nachtraeglich bearbeitet werden.
+
+Beim normalen Skriptstart werden gueltige Custom-Configs automatisch gesucht.
+Gefunden werden JSON-Dateien neben dem Skript, in lokalen `Configs`-Ordnern,
+unter `BloatRemoverConfigs` und direkt im Stamm eingebundener Laufwerke. Fremde,
+ungueltige und `*.example.json`-Dateien werden ignoriert. Bei einem Treffer fragt
+das Skript sofort, ob das Profil unbeaufsichtigt ausgefuehrt werden soll.
 
 Profile koennen WinGet-, EXE- und MSI-Installationen sowie Deinstallationen per
 exakter WinGet-ID oder installiertem Programmnamen enthalten. EXE/MSI-Dateien
@@ -50,6 +59,11 @@ relative Pfade und eine SHA-256-Pruefsumme in der JSON-Datei gespeichert.
 WinGet-Pakete werden im Builder aus einer fertigen Checkliste gewaehlt: mit den
 Pfeiltasten navigieren, mit der Leertaste markieren und mit Enter uebernehmen.
 Die WinGet-IDs muessen dabei nicht manuell gesucht oder eingegeben werden.
+
+Der Energieblock eines Profils unterstuetzt die Profile Energiesparend,
+Ausgeglichen und Leistung, eigene Zeitlimits fuer Netz- und Akkubetrieb sowie
+Schnellstart, Ruhezustand und selektives USB-Energiesparen. Nicht gesetzte Werte
+bleiben am Zielrechner unveraendert.
 
 Fuer einen komplett unbeaufsichtigten Start kann die JSON-Datei direkt als
 Parameter uebergeben werden:

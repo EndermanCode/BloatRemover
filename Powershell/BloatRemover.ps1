@@ -50,6 +50,7 @@ $pathTaskbar = "$env:USERPROFILE\AppData\Roaming\Microsoft\Internet Explorer\Qui
 $pathStartmenu = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\"
 $ErrorActionPreference = 'Continue'
 $script:CustomConfigExecuted = $false
+$ScriptDirectory = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) { $PSScriptRoot } else { (Get-Location).Path }
 
 function Test-Yes {
     param([string]$Value)
@@ -339,6 +340,106 @@ function Get-UniqueInstallerDestination {
     throw "Fuer '$FileName' konnte kein freier Dateiname erzeugt werden."
 }
 
+function Read-EnergyToggleSetting {
+    param([Parameter(Mandatory)][string]$Label)
+
+    Write-Host ""
+    Write-Host "  $Label" -ForegroundColor White
+    Write-MenuItem -Key "0" -Label "Nicht aendern"
+    Write-MenuItem -Key "1" -Label "Aktivieren"
+    Write-MenuItem -Key "2" -Label "Deaktivieren"
+    $choice = Read-MenuChoice -Prompt "Auswahl" -AllowedValues @("0", "1", "2")
+    switch ($choice) {
+        "1" { return "enabled" }
+        "2" { return "disabled" }
+        default { return "unchanged" }
+    }
+}
+
+function Read-CustomConfigEnergy {
+    Write-Host ""
+    Write-Section -Title "ENERGIEEINSTELLUNGEN"
+    Write-MenuItem -Key "0" -Label "Kein Energieprofil / nicht aendern"
+    Write-MenuItem -Key "1" -Label "Profil: Energiesparend"
+    Write-MenuItem -Key "2" -Label "Profil: Ausgeglichen"
+    Write-MenuItem -Key "3" -Label "Profil: Leistung"
+    Write-MenuItem -Key "4" -Label "Eigene AC/DC-Zeitlimits"
+    $profileChoice = Read-MenuChoice -Prompt "Energieprofil" -AllowedValues @("0", "1", "2", "3", "4")
+
+    $preset = $null
+    $timeouts = $null
+    switch ($profileChoice) {
+        "1" { $preset = "Eco" }
+        "2" { $preset = "Balanced" }
+        "3" { $preset = "Performance" }
+        "4" {
+            Write-Status -Type Info -Message "Alle Zeitwerte sind Minuten; 0 bedeutet Nie."
+            $timeouts = [ordered]@{
+                monitorAc = Read-Integer -Prompt "Bildschirm aus (Netzbetrieb)" -Default 15
+                monitorDc = Read-Integer -Prompt "Bildschirm aus (Akku)" -Default 5
+                standbyAc = Read-Integer -Prompt "Standby (Netzbetrieb)" -Default 30
+                standbyDc = Read-Integer -Prompt "Standby (Akku)" -Default 15
+                hibernateAc = Read-Integer -Prompt "Ruhezustand (Netzbetrieb)" -Default 120
+                hibernateDc = Read-Integer -Prompt "Ruhezustand (Akku)" -Default 60
+                diskAc = Read-Integer -Prompt "Festplatte aus (Netzbetrieb)" -Default 20
+                diskDc = Read-Integer -Prompt "Festplatte aus (Akku)" -Default 10
+            }
+        }
+    }
+
+    [pscustomobject][ordered]@{
+        preset = $preset
+        timeouts = $timeouts
+        fastStartup = Read-EnergyToggleSetting -Label "Schnellstart"
+        hibernation = Read-EnergyToggleSetting -Label "Ruhezustand"
+        usbPowerSaving = Read-EnergyToggleSetting -Label "Selektives USB-Energiesparen"
+    }
+}
+
+function Get-CustomConfigEnergySummary {
+    param($Energy)
+
+    if ($null -eq $Energy) { return "Nicht konfiguriert" }
+    $profile = if ($Energy.preset) { [string]$Energy.preset } elseif ($Energy.timeouts) { "Eigene Zeitlimits" } else { "Kein Profil" }
+    return ("{0}; Schnellstart={1}; Ruhezustand={2}; USB={3}" -f
+        $profile,
+        $(if ($Energy.fastStartup) { $Energy.fastStartup } else { 'unchanged' }),
+        $(if ($Energy.hibernation) { $Energy.hibernation } else { 'unchanged' }),
+        $(if ($Energy.usbPowerSaving) { $Energy.usbPowerSaving } else { 'unchanged' }))
+}
+
+function Invoke-CustomConfigEnergy {
+    param([Parameter(Mandatory)]$Energy)
+
+    if ($Energy.preset) {
+        $preset = [string]$Energy.preset
+        if ($preset -notin @('Eco', 'Balanced', 'Performance')) { throw "Unbekanntes Energieprofil '$preset'." }
+        Set-PowerPreset -Preset $preset
+    }
+    elseif ($Energy.timeouts) {
+        Set-PowerTimeouts `
+            -MonitorAc ([int]$Energy.timeouts.monitorAc) -MonitorDc ([int]$Energy.timeouts.monitorDc) `
+            -StandbyAc ([int]$Energy.timeouts.standbyAc) -StandbyDc ([int]$Energy.timeouts.standbyDc) `
+            -HibernateAc ([int]$Energy.timeouts.hibernateAc) -HibernateDc ([int]$Energy.timeouts.hibernateDc) `
+            -DiskAc ([int]$Energy.timeouts.diskAc) -DiskDc ([int]$Energy.timeouts.diskDc)
+        Update-ActivePowerScheme
+        Write-Status -Type Success -Message "Eigene Energie-Zeitlimits wurden angewendet."
+    }
+
+    $hibernation = if ($Energy.hibernation) { [string]$Energy.hibernation } else { 'unchanged' }
+    $fastStartup = if ($Energy.fastStartup) { [string]$Energy.fastStartup } else { 'unchanged' }
+    $usbPowerSaving = if ($Energy.usbPowerSaving) { [string]$Energy.usbPowerSaving } else { 'unchanged' }
+
+    if ($hibernation -eq 'enabled') { Set-Hibernation -Enabled $true }
+    elseif ($hibernation -eq 'disabled') { Set-Hibernation -Enabled $false }
+
+    if ($fastStartup -eq 'enabled') { Set-FastStartup -Enabled $true }
+    elseif ($fastStartup -eq 'disabled') { Set-FastStartup -Enabled $false }
+
+    if ($usbPowerSaving -eq 'enabled') { Set-UsbPowerSaving -Enabled $true }
+    elseif ($usbPowerSaving -eq 'disabled') { Set-UsbPowerSaving -Enabled $false }
+}
+
 function New-CustomInstallConfig {
     Write-Banner
     Write-Section -Title "JSON CONFIG BUILDER"
@@ -455,8 +556,14 @@ function New-CustomInstallConfig {
         $continueAnswer = Read-Host "  Weitere Aktion hinzufuegen? [J/n]"
     } while ($continueAnswer -notmatch '^(?i:n|nein|no)$')
 
-    if ($actions.Count -eq 0) {
-        Write-Status -Type Warning -Message "Keine Aktionen hinzugefuegt. Es wurde keine JSON-Datei erstellt."
+    $energy = $null
+    $energyAnswer = Read-Host "  Energieeinstellungen in das Profil aufnehmen? [j/N]"
+    if (Test-Yes $energyAnswer) {
+        $energy = Read-CustomConfigEnergy
+    }
+
+    if ($actions.Count -eq 0 -and $null -eq $energy) {
+        Write-Status -Type Warning -Message "Keine Aktionen oder Energieeinstellungen hinzugefuegt. Es wurde keine JSON-Datei erstellt."
         return
     }
 
@@ -518,6 +625,7 @@ function New-CustomInstallConfig {
         name = $configName
         createdAt = (Get-Date).ToString('o')
         restartExplorer = $restartExplorer
+        energy = $energy
         actions = $serializedActions
     }
     $safeName = ($configName -replace '[<>:"/\\|?*]', '_').Trim().TrimEnd('.')
@@ -537,25 +645,53 @@ function New-CustomInstallConfig {
     }
 }
 
+function Test-CustomConfigFile {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if ([IO.Path]::GetFileName($Path) -match '(?i)\.example\.json$') { return $false }
+    try {
+        $config = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $hasActions = @($config.actions).Count -gt 0 -or @($config.applications).Count -gt 0
+        $hasEnergy = ($config.PSObject.Properties.Name -contains 'energy') -and $null -ne $config.energy
+        return (
+            -not [string]::IsNullOrWhiteSpace([string]$config.name) -and
+            ($hasActions -or $hasEnergy)
+        )
+    }
+    catch {
+        return $false
+    }
+}
+
 function Get-AvailableCustomConfigs {
     $directories = [System.Collections.Generic.List[string]]::new()
-    $localConfigDirectory = Join-Path $PSScriptRoot 'Configs'
+    if (Test-Path -LiteralPath $ScriptDirectory) { $directories.Add($ScriptDirectory) }
+    $localConfigDirectory = Join-Path $ScriptDirectory 'Configs'
     if (Test-Path -LiteralPath $localConfigDirectory) { $directories.Add($localConfigDirectory) }
 
-    foreach ($drive in @(Get-RemovableConfigDrives)) {
-        $usbConfigDirectory = Join-Path $drive.DeviceID 'BloatRemoverConfigs'
-        if (Test-Path -LiteralPath $usbConfigDirectory) { $directories.Add($usbConfigDirectory) }
+    if (-not [string]::IsNullOrWhiteSpace($env:BLOATREMOVER_CONFIG_DIR) -and (Test-Path -LiteralPath $env:BLOATREMOVER_CONFIG_DIR)) {
+        $directories.Add($env:BLOATREMOVER_CONFIG_DIR)
+    }
+
+    foreach ($drive in @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
+        if ([string]::IsNullOrWhiteSpace($drive.Root) -or -not (Test-Path -LiteralPath $drive.Root)) { continue }
+        $directories.Add($drive.Root)
+        $configDirectory = Join-Path $drive.Root 'BloatRemoverConfigs'
+        if (Test-Path -LiteralPath $configDirectory) { $directories.Add($configDirectory) }
     }
 
     @(
         foreach ($directory in ($directories | Sort-Object -Unique)) {
-            Get-ChildItem -LiteralPath $directory -Filter '*.json' -File -ErrorAction SilentlyContinue
+            Get-ChildItem -LiteralPath $directory -Filter '*.json' -File -ErrorAction SilentlyContinue |
+                Where-Object { Test-CustomConfigFile -Path $_.FullName }
         }
     ) | Sort-Object FullName -Unique
 }
 
 function Select-CustomConfigFile {
-    $configs = @(Get-AvailableCustomConfigs)
+    param([object[]]$Configs)
+
+    $configs = if ($null -ne $Configs) { @($Configs) } else { @(Get-AvailableCustomConfigs) }
     Write-Host ""
     Write-Section -Title "KONFIGURATION WAEHLEN"
     if ($configs.Count -gt 0) {
@@ -587,6 +723,277 @@ function Select-CustomConfigFile {
         }
         Write-Status -Type Warning -Message "Ungueltige Auswahl."
     } while ($true)
+}
+
+function Invoke-StartupConfigCheck {
+    $configs = @(Get-AvailableCustomConfigs)
+    if ($configs.Count -eq 0) {
+        return [pscustomobject]@{ Executed = $false; Succeeded = $true }
+    }
+
+    Write-Banner
+    Write-Section -Title "JSON-KONFIGURATION GEFUNDEN"
+    Write-Host ""
+    if ($configs.Count -eq 1) {
+        Write-Status -Type Info -Message "Gefunden: $($configs[0].BaseName)  [$($configs[0].DirectoryName)]"
+        $answer = Read-Host "  Diese Konfiguration jetzt unbeaufsichtigt ausfuehren? [j/N]"
+        if (-not (Test-Yes $answer)) {
+            return [pscustomobject]@{ Executed = $false; Succeeded = $true }
+        }
+        $configPath = $configs[0].FullName
+    }
+    else {
+        Write-Status -Type Info -Message "$($configs.Count) gueltige Konfigurationen wurden gefunden."
+        $answer = Read-Host "  Eine Konfiguration jetzt unbeaufsichtigt ausfuehren? [j/N]"
+        if (-not (Test-Yes $answer)) {
+            return [pscustomobject]@{ Executed = $false; Succeeded = $true }
+        }
+        $configPath = Select-CustomConfigFile -Configs $configs
+        if ([string]::IsNullOrWhiteSpace($configPath)) {
+            return [pscustomobject]@{ Executed = $false; Succeeded = $true }
+        }
+    }
+
+    $succeeded = Install-CustomConfig -Path $configPath
+    return [pscustomobject]@{ Executed = $true; Succeeded = [bool]$succeeded }
+}
+
+function Get-CustomActionSummary {
+    param([Parameter(Mandatory)]$Action)
+
+    $mode = if (([string]$Action.action).ToLowerInvariant() -eq 'uninstall') { 'Deinstallieren' } else { 'Installieren' }
+    $type = ([string]$Action.type).ToUpperInvariant()
+    $target = if ($Action.id) { $Action.id } elseif ($Action.matchName) { $Action.matchName } elseif ($Action.path) { $Action.path } else { '-' }
+    return "$mode | $type | $target"
+}
+
+function Show-CustomConfigEditorState {
+    param(
+        [Parameter(Mandatory)]$Config,
+        [Parameter(Mandatory)][object[]]$Actions,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    Write-Banner
+    Write-Section -Title "CUSTOM CONFIG EDITOR"
+    Write-Host ""
+    Write-Status -Type Info -Message "Datei: $Path"
+    Write-Status -Type Info -Message "Profilname: $($Config.name)"
+    Write-Status -Type Info -Message "Explorer-Neustart: $(if ($Config.restartExplorer -eq $true) { 'Ja' } else { 'Nein' })"
+    Write-Status -Type Info -Message "Energie: $(Get-CustomConfigEnergySummary -Energy $Config.energy)"
+    Write-Host ""
+    Write-Section -Title "AKTUELLE AKTIONEN"
+    if ($Actions.Count -eq 0) {
+        Write-Status -Type Info -Message "Keine Programm-Aktionen konfiguriert."
+    }
+    else {
+        for ($index = 0; $index -lt $Actions.Count; $index++) {
+            Write-MenuItem -Key ([string]($index + 1)) -Label $Actions[$index].name -Hint (Get-CustomActionSummary -Action $Actions[$index])
+        }
+    }
+}
+
+function Select-CustomActionIndex {
+    param(
+        [Parameter(Mandatory)][object[]]$Actions,
+        [Parameter(Mandatory)][string]$Prompt
+    )
+
+    if ($Actions.Count -eq 0) {
+        Write-Status -Type Warning -Message "Es sind keine Aktionen vorhanden."
+        return -1
+    }
+    do {
+        $rawValue = Read-Host "  $Prompt (1-$($Actions.Count), 0 = Abbrechen)"
+        $number = 0
+        if ([int]::TryParse($rawValue, [ref]$number) -and $number -eq 0) { return -1 }
+        if ($number -ge 1 -and $number -le $Actions.Count) { return ($number - 1) }
+        Write-Status -Type Warning -Message "Ungueltige Aktionsnummer."
+    } while ($true)
+}
+
+function Save-CustomConfigObject {
+    param(
+        [Parameter(Mandatory)]$Config,
+        [Parameter(Mandatory)][object[]]$Actions,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $Config | Add-Member -NotePropertyName schemaVersion -NotePropertyValue 2 -Force
+    $Config | Add-Member -NotePropertyName modifiedAt -NotePropertyValue ((Get-Date).ToString('o')) -Force
+    $Config | Add-Member -NotePropertyName actions -NotePropertyValue @($Actions) -Force
+    if ($Config.PSObject.Properties.Name -contains 'applications') {
+        $Config.PSObject.Properties.Remove('applications')
+    }
+    $json = $Config | ConvertTo-Json -Depth 10
+    $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($Path, $json, $utf8WithoutBom)
+}
+
+function Edit-CustomConfig {
+    $configPath = Select-CustomConfigFile
+    if ([string]::IsNullOrWhiteSpace($configPath)) { return }
+
+    try {
+        $config = Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        Write-Status -Type Error -Message "Konfiguration konnte nicht geladen werden: $($_.Exception.Message)"
+        return
+    }
+
+    $sourceActions = @($config.actions)
+    if ($sourceActions.Count -eq 0 -and @($config.applications).Count -gt 0) {
+        $sourceActions = @($config.applications | ForEach-Object {
+            $_ | Add-Member -NotePropertyName action -NotePropertyValue 'install' -PassThru -Force
+        })
+    }
+    $actions = [System.Collections.Generic.List[object]]::new()
+    foreach ($action in $sourceActions) { $actions.Add($action) }
+    $configDirectory = Split-Path -Parent $configPath
+
+    while ($true) {
+        Show-CustomConfigEditorState -Config $config -Actions @($actions) -Path $configPath
+        Write-Host ""
+        Write-MenuItem -Key "1" -Label "Profilnamen aendern"
+        Write-MenuItem -Key "2" -Label "Explorer-Neustart umschalten"
+        Write-MenuItem -Key "3" -Label "Energieeinstellungen bearbeiten"
+        Write-MenuItem -Key "4" -Label "WinGet-Pakete hinzufuegen"
+        Write-MenuItem -Key "5" -Label "Deinstallation hinzufuegen"
+        Write-MenuItem -Key "6" -Label "EXE/MSI-Installer hinzufuegen"
+        Write-MenuItem -Key "7" -Label "Aktion bearbeiten"
+        Write-MenuItem -Key "8" -Label "Aktion entfernen"
+        Write-MenuItem -Key "9" -Label "Aktionsreihenfolge aendern"
+        Write-MenuItem -Key "S" -Label "Speichern und Editor schliessen"
+        Write-MenuItem -Key "0" -Label "Ohne Speichern schliessen"
+        $choice = (Read-Host "  Auswahl").Trim().ToLowerInvariant()
+
+        switch ($choice) {
+            "1" {
+                $newName = (Read-Host "  Neuer Profilname [$($config.name)]").Trim()
+                if ($newName) { $config | Add-Member -NotePropertyName name -NotePropertyValue $newName -Force }
+            }
+            "2" {
+                $config | Add-Member -NotePropertyName restartExplorer -NotePropertyValue (-not ($config.restartExplorer -eq $true)) -Force
+            }
+            "3" {
+                Write-MenuItem -Key "1" -Label "Energieeinstellungen neu setzen"
+                Write-MenuItem -Key "2" -Label "Energieeinstellungen entfernen"
+                $energyChoice = Read-MenuChoice -Prompt "Auswahl" -AllowedValues @("1", "2")
+                $energy = if ($energyChoice -eq "1") { Read-CustomConfigEnergy } else { $null }
+                $config | Add-Member -NotePropertyName energy -NotePropertyValue $energy -Force
+            }
+            "4" {
+                foreach ($package in @(Select-WingetPackages)) {
+                    $duplicate = @($actions | Where-Object {
+                        $_.action -eq 'install' -and $_.type -eq 'winget' -and
+                        (($_.id -and $_.id -eq $package.Id) -or ($_.matchName -and $_.matchName -eq $package.Name))
+                    }).Count -gt 0
+                    if (-not $duplicate) {
+                        $actions.Add([pscustomobject][ordered]@{
+                            action = 'install'; name = $package.DisplayName; type = 'winget'
+                            id = $package.Id; matchName = $package.Name; source = $package.Source
+                        })
+                    }
+                }
+            }
+            "5" {
+                $displayName = Read-RequiredValue -Prompt "Anzeigename der Deinstallation"
+                Write-MenuItem -Key "1" -Label "Exakte WinGet-ID"
+                Write-MenuItem -Key "2" -Label "Exakter installierter Programmname"
+                $matchChoice = Read-MenuChoice -Prompt "Suchmethode" -AllowedValues @("1", "2")
+                $id = if ($matchChoice -eq "1") { Read-RequiredValue -Prompt "WinGet-ID" } else { $null }
+                $matchName = if ($matchChoice -eq "2") { Read-RequiredValue -Prompt "Installierter Programmname" } else { $null }
+                $actions.Add([pscustomobject][ordered]@{
+                    action = 'uninstall'; name = $displayName; type = 'winget'; id = $id; matchName = $matchName
+                })
+            }
+            "6" {
+                $installerChoice = Read-MenuChoice -Prompt "1 = EXE, 2 = MSI" -AllowedValues @("1", "2")
+                $type = if ($installerChoice -eq "1") { 'exe' } else { 'msi' }
+                $name = Read-RequiredValue -Prompt "Anzeigename"
+                $sourcePath = Read-RequiredValue -Prompt "Vollstaendiger Installer-Pfad"
+                if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                    Write-Status -Type Warning -Message "Installer wurde nicht gefunden."
+                    break
+                }
+                $defaultArguments = if ($type -eq 'msi') { '/qn /norestart' } else { '' }
+                $arguments = (Read-Host "  Installationsparameter [$defaultArguments]").Trim()
+                if (-not $arguments) { $arguments = $defaultArguments }
+                if ($type -eq 'exe' -and -not $arguments) { $arguments = Read-RequiredValue -Prompt "Silent-Installationsparameter" }
+
+                $copyAnswer = Read-Host "  Installer in den portablen Config-Ordner kopieren? [J/n]"
+                $savedPath = (Resolve-Path -LiteralPath $sourcePath).Path
+                $hash = $null
+                if ($copyAnswer -notmatch '^(?i:n|nein|no)$') {
+                    $installerDirectory = Join-Path $configDirectory 'Installers'
+                    New-Item -ItemType Directory -Path $installerDirectory -Force -ErrorAction Stop | Out-Null
+                    $destination = Get-UniqueInstallerDestination -Directory $installerDirectory -FileName ([IO.Path]::GetFileName($savedPath))
+                    Copy-Item -LiteralPath $savedPath -Destination $destination -ErrorAction Stop
+                    $savedPath = "Installers\$([IO.Path]::GetFileName($destination))"
+                    $hash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256 -ErrorAction Stop).Hash
+                }
+                $actions.Add([pscustomobject][ordered]@{
+                    action = 'install'; name = $name; type = $type; path = $savedPath
+                    arguments = $arguments; sha256 = $hash; successExitCodes = @(0, 1641, 3010)
+                })
+            }
+            "7" {
+                $index = Select-CustomActionIndex -Actions @($actions) -Prompt "Aktion bearbeiten"
+                if ($index -ge 0) {
+                    $action = $actions[$index]
+                    $newName = (Read-Host "  Anzeigename [$($action.name)]").Trim()
+                    if ($newName) { $action | Add-Member -NotePropertyName name -NotePropertyValue $newName -Force }
+                    if (([string]$action.action).ToLowerInvariant() -eq 'uninstall') {
+                        if ($action.id) {
+                            $newId = (Read-Host "  WinGet-ID [$($action.id)]").Trim()
+                            if ($newId) { $action | Add-Member -NotePropertyName id -NotePropertyValue $newId -Force }
+                        }
+                        else {
+                            $newMatchName = (Read-Host "  Installierter Programmname [$($action.matchName)]").Trim()
+                            if ($newMatchName) { $action | Add-Member -NotePropertyName matchName -NotePropertyValue $newMatchName -Force }
+                        }
+                    }
+                    elseif ($action.path) {
+                        $newPath = (Read-Host "  Installer-Pfad [$($action.path)]").Trim()
+                        if ($newPath) {
+                            $action | Add-Member -NotePropertyName path -NotePropertyValue $newPath -Force
+                            $action | Add-Member -NotePropertyName sha256 -NotePropertyValue $null -Force
+                        }
+                        $newArguments = (Read-Host "  Parameter [$($action.arguments)]").Trim()
+                        if ($newArguments) { $action | Add-Member -NotePropertyName arguments -NotePropertyValue $newArguments -Force }
+                    }
+                }
+            }
+            "8" {
+                $index = Select-CustomActionIndex -Actions @($actions) -Prompt "Aktion entfernen"
+                if ($index -ge 0) { $actions.RemoveAt($index) }
+            }
+            "9" {
+                $index = Select-CustomActionIndex -Actions @($actions) -Prompt "Aktion verschieben"
+                if ($index -ge 0) {
+                    $direction = Read-MenuChoice -Prompt "1 = nach oben, 2 = nach unten" -AllowedValues @("1", "2")
+                    $target = if ($direction -eq "1") { $index - 1 } else { $index + 1 }
+                    if ($target -ge 0 -and $target -lt $actions.Count) {
+                        $temporary = $actions[$target]
+                        $actions[$target] = $actions[$index]
+                        $actions[$index] = $temporary
+                    }
+                }
+            }
+            "s" {
+                if ($actions.Count -eq 0 -and $null -eq $config.energy) {
+                    Write-Status -Type Warning -Message "Mindestens eine Programm-Aktion oder Energieeinstellung ist erforderlich."
+                    break
+                }
+                Save-CustomConfigObject -Config $config -Actions @($actions) -Path $configPath
+                Write-Status -Type Success -Message "Konfiguration wurde gespeichert."
+                return
+            }
+            "0" { return }
+            default { Write-Status -Type Warning -Message "Ungueltige Editor-Auswahl." }
+        }
+    }
 }
 
 function Invoke-CustomFileInstaller {
@@ -667,14 +1074,14 @@ function Install-CustomConfig {
             $_ | Add-Member -NotePropertyName action -NotePropertyValue 'install' -PassThru -Force
         })
     }
-    if ($actions.Count -eq 0) {
-        Write-Status -Type Warning -Message "Die Konfiguration enthaelt keine Aktionen."
+    if ($actions.Count -eq 0 -and $null -eq $config.energy) {
+        Write-Status -Type Warning -Message "Die Konfiguration enthaelt keine Aktionen oder Energieeinstellungen."
         return $false
     }
 
     Write-Host ""
     Write-Status -Type Info -Message "Profil: $($config.name)"
-    Write-Status -Type Info -Message "$($actions.Count) Aktion(en) werden jetzt ohne weitere Rueckfragen ausgefuehrt."
+    Write-Status -Type Info -Message "$($actions.Count) Programm-Aktion(en) werden jetzt ohne weitere Rueckfragen ausgefuehrt."
 
     $configDirectory = Split-Path -Parent $configPath
     $failedActions = 0
@@ -706,6 +1113,19 @@ function Install-CustomConfig {
         catch {
             $failedActions++
             Write-Status -Type Error -Message "'$($action.name)' ist fehlgeschlagen: $($_.Exception.Message)"
+        }
+    }
+
+    if ($null -ne $config.energy) {
+        Write-Host ""
+        Write-Status -Type Info -Message "Energieeinstellungen werden angewendet: $(Get-CustomConfigEnergySummary -Energy $config.energy)"
+        try {
+            Invoke-CustomConfigEnergy -Energy $config.energy
+            Write-Status -Type Success -Message "Energieeinstellungen wurden verarbeitet."
+        }
+        catch {
+            $failedActions++
+            Write-Status -Type Error -Message "Energieeinstellungen sind fehlgeschlagen: $($_.Exception.Message)"
         }
     }
 
@@ -1103,8 +1523,8 @@ function Read-MultiMenuChoice {
             Write-Status -Type Warning -Message "'0' kann nicht mit anderen Aktionen kombiniert werden."
             continue
         }
-        if ($values.Count -gt 1 -and ($values -contains 'b' -or $values -contains 'c')) {
-            Write-Status -Type Warning -Message "Builder und Custom-Konfiguration bitte jeweils einzeln auswaehlen."
+        if ($values.Count -gt 1 -and ($values -contains 'b' -or $values -contains 'c' -or $values -contains 'e')) {
+            Write-Status -Type Warning -Message "Builder, Editor und Custom-Konfiguration bitte jeweils einzeln auswaehlen."
             continue
         }
 
@@ -1490,11 +1910,12 @@ function Show-MainMenu {
         Write-MenuItem -Key "A" -Label "Alles ausfuehren" -Hint "Menuepunkte 1 bis 7 nacheinander"
         Write-MenuItem -Key "C" -Label "Custom-JSON ausfuehren" -Hint "danach vollstaendig ohne Rueckfragen"
         Write-MenuItem -Key "B" -Label "JSON Config Builder" -Hint "Profil lokal oder auf USB erstellen"
+        Write-MenuItem -Key "E" -Label "JSON Config Editor" -Hint "Settings und Aktionen anzeigen/bearbeiten"
         Write-MenuItem -Key "0" -Label "Beenden"
         Write-Host ""
         Write-Status -Type Info -Message "Mehrfachauswahl mit Komma: z. B. 1,2,4,6"
 
-        $choices = @(Read-MultiMenuChoice -Prompt "Auswahl" -AllowedValues @("0", "1", "2", "3", "4", "5", "6", "7", "c", "b") -AllValues @("1", "2", "3", "4", "5", "6", "7"))
+        $choices = @(Read-MultiMenuChoice -Prompt "Auswahl" -AllowedValues @("0", "1", "2", "3", "4", "5", "6", "7", "c", "b", "e") -AllValues @("1", "2", "3", "4", "5", "6", "7"))
         if ($choices -contains "0") { break }
 
         if ($choices -contains "b") {
@@ -1504,6 +1925,10 @@ function Show-MainMenu {
         if ($choices -contains "c") {
             Install-CustomConfig | Out-Null
             return
+        }
+        if ($choices -contains "e") {
+            Invoke-MenuAction -Title "JSON CONFIG EDITOR" -Action { Edit-CustomConfig }
+            continue
         }
 
         $actionLabels = @{
@@ -1568,6 +1993,12 @@ if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
     Write-Section -Title "UNBEAUFSICHTIGTE JSON-KONFIGURATION"
     $configSucceeded = Install-CustomConfig -Path $ConfigPath
     if (-not $configSucceeded) { exit 2 }
+    exit 0
+}
+
+$startupConfigResult = Invoke-StartupConfigCheck
+if ($startupConfigResult.Executed) {
+    if (-not $startupConfigResult.Succeeded) { exit 2 }
     exit 0
 }
 
