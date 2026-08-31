@@ -37,8 +37,8 @@ $DefaultWingetPackages = @(
     [pscustomobject]@{ DisplayName = "Adobe Acrobat Reader (64-Bit)"; Id = "Adobe.Acrobat.Reader.64-bit"; Name = $null; Source = "winget"; DetectName = "Adobe Acrobat" }
     [pscustomobject]@{ DisplayName = "7-Zip"; Id = "7zip.7zip"; Name = $null; Source = "winget"; DetectName = "7-Zip" }
     [pscustomobject]@{ DisplayName = "Mozilla Firefox"; Id = "Mozilla.Firefox"; Name = $null; Source = "winget"; DetectName = "Mozilla Firefox" }
-    [pscustomobject]@{ DisplayName = "TeamViewer Host"; Id = "TeamViewer.TeamViewer.Host"; Name = $null; Source = "winget"; DetectName = "TeamViewer Host" }
-    [pscustomobject]@{ DisplayName = "Notepad++"; Id = "Notepad++.Notepad++"; Name = $null; Source = "winget"; DetectName = "Notepad++" }
+    [pscustomobject]@{ DisplayName = "TeamViewer Host"; Id = "TeamViewer.TeamViewer"; Name = $null; Source = "winget"; DetectName = "TeamViewer Host" }
+    #[pscustomobject]@{ DisplayName = "Notepad++"; Id = "Notepad++.Notepad++"; Name = $null; Source = "winget"; DetectName = "Notepad++" }
     # HP Support Assistant hat derzeit kein Community-Manifest. WinGet greift
     # deshalb ueber den Namen auf die Microsoft-Store-Quelle zu.
     [pscustomobject]@{ DisplayName = "HP Support Assistant"; Id = $null; Name = "HP Support Assistant"; Source = "msstore"; DetectName = "HP Support Assistant" }
