@@ -2667,13 +2667,20 @@ function Remove-HPBloat {
 
     # Mehrere Durchlaeufe sind absichtlich: Manche HP-Deinstallationen legen nachgelagerte
     # Komponenten erst frei, nachdem das Hauptprodukt entfernt wurde.
-    for ($pass = 1; $pass -le 3; $pass++) {
+    $maxPasses = 4
+    for ($pass = 1; $pass -le $maxPasses; $pass++) {
         $provisionedPackages = @(Get-HPProvisionedPackages)
         $installedPackages = @(Get-HPAppxPackages)
-        $installedPrograms = @(Get-HPInstalledPrograms)
+        # Reihenfolge ist wichtig: z. B. muss HP Wolf Security vor seiner Console und
+        # dem Security Update Service entfernt werden, sonst schlagen diese fehl.
+        $installedPrograms = @(Get-HPInstalledPrograms | Sort-Object { Get-HPUninstallPriority -Name $_.DisplayName }, DisplayName)
         $candidateCount = $provisionedPackages.Count + $installedPackages.Count + $installedPrograms.Count
 
         if ($candidateCount -eq 0) { break }
+
+        # Laufende HP-Apps blockieren die Entfernung ihrer Pakete.
+        Stop-HPProcesses
+        $isLastPass = $pass -eq $maxPasses
 
         Write-Status -Type Info -Message ("HP-Durchlauf {0}: {1} provisionierte Apps, {2} installierte Apps, {3} Desktop-Programme." -f $pass, $provisionedPackages.Count, $installedPackages.Count, $installedPrograms.Count)
 
@@ -2683,30 +2690,31 @@ function Remove-HPBloat {
                 Remove-AppxProvisionedPackage -Online -PackageName $package.PackageName -AllUsers -ErrorAction Stop | Out-Null
             }
             catch {
-                Write-Status -Type Warning -Message "Provisionierte App '$($package.DisplayName)' konnte nicht entfernt werden: $($_.Exception.Message)"
+                try {
+                    Remove-AppxProvisionedPackage -Online -PackageName $package.PackageName -ErrorAction Stop | Out-Null
+                }
+                catch {
+                    if ($isLastPass) {
+                        Write-Status -Type Warning -Message "Provisionierte App '$($package.DisplayName)' konnte nicht entfernt werden: $($_.Exception.Message)"
+                    }
+                }
             }
         }
 
         foreach ($package in $installedPackages) {
             Write-Host "  Entferne Store-App: $($package.Name)"
-            try {
-                Remove-AppxPackage -Package $package.PackageFullName -AllUsers -ErrorAction Stop
-            }
-            catch {
-                # Auf aelteren Windows-Builds steht -AllUsers nicht immer verlaesslich zur
-                # Verfuegung. Der zweite Versuch entfernt zumindest das aktuelle Benutzerpaket.
-                try {
-                    Remove-AppxPackage -Package $package.PackageFullName -ErrorAction Stop
-                }
-                catch {
-                    Write-Status -Type Warning -Message "Store-App '$($package.Name)' konnte nicht entfernt werden: $($_.Exception.Message)"
-                }
+            $removeError = Remove-HPAppxPackage -Package $package
+            if ($removeError -and $isLastPass) {
+                Write-Status -Type Warning -Message "Store-App '$($package.Name)' konnte nicht entfernt werden: $removeError"
             }
         }
 
         foreach ($program in $installedPrograms) {
             Invoke-HPProgramUninstall -Program $program
         }
+
+        # Deinstallationen raeumen teils asynchron auf; kurz warten, bevor neu ermittelt wird.
+        Start-Sleep -Seconds 5
     }
 
     Remove-HPDocumentation
@@ -2757,8 +2765,8 @@ function Test-HPComponent {
 
     return (
         $Name -match '(?i)(^|[\s._-])HP($|[\s._-])|Hewlett[ -]Packard|^myHP$|^AD2F1837\.|HPAudioControl|HPWolfSecurity' -or
-        $Publisher -match '(?i)(^|\b)(HP Inc\.?|Hewlett[ -]Packard|HP Development Company|Poly)(\b|$)' -or
-        $Identity -match '(?i)(^|[\\._-])HP($|[\\._-])|AD2F1837|Hewlett[ -]Packard'
+        $Publisher -match '(?i)(^|\b)(HP Inc\.?|Hewlett[ -]Packard|HP Development Company|Poly|Bromium)(\b|$)|^HP$|ED346674-0FA1-4272-85CE-3187C9C86E26|v10z8vjag6ke6' -or
+        $Identity -match '(?i)(^|[\\._-])HP($|[\\._-])|AD2F1837|v10z8vjag6ke6|Hewlett[ -]Packard'
     )
 }
 
@@ -2766,7 +2774,10 @@ function Get-HPAppxPackages {
     @(
         Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue |
             Where-Object {
-                Test-HPComponent -Name $_.Name -Publisher $_.PublisherDisplayName -Identity $_.PackageFamilyName
+                # Publisher/PublisherId identifizieren HP eindeutig, auch wenn der Paketname
+                # kein "HP" enthaelt. Frameworks und nicht entfernbare Pakete ausnehmen.
+                $_.IsFramework -ne $true -and $_.NonRemovable -ne $true -and
+                (Test-HPComponent -Name $_.Name -Publisher "$($_.Publisher) $($_.PublisherId)" -Identity $_.PackageFamilyName)
             } |
             Sort-Object PackageFullName -Unique
     )
@@ -2809,42 +2820,168 @@ function Get-HPInstalledPrograms {
     @($programs | Sort-Object PSPath -Unique)
 }
 
+function Get-HPUninstallPriority {
+    param([AllowNull()][string]$Name)
+
+    if ($Name -match '(?i)^HP Client Security Manager') { return 0 }
+    if ($Name -match '(?i)^HP Wolf Security\s*$') { return 1 }
+    if ($Name -match '(?i)^HP Wolf Security') { return 2 }
+    if ($Name -match '(?i)^HP Sure ') { return 3 }
+    if ($Name -match '(?i)^HP Security Update Service') { return 9 }
+    return 5
+}
+
+function Stop-HPProcesses {
+    Get-Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $processPath = [string]$_.Path
+            $processPath -match '(?i)\\WindowsApps\\AD2F1837\.' -and -not (Test-HPProtectedComponent -Name $processPath)
+        } |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+}
+
+function Remove-HPAppxPackage {
+    # Gibt $null bei Erfolg zurueck, sonst die letzte Fehlermeldung.
+    param([Parameter(Mandatory)]$Package)
+
+    $fullName = [string]$Package.PackageFullName
+    $lastError = $null
+    try {
+        Remove-AppxPackage -Package $fullName -AllUsers -ErrorAction Stop
+        return $null
+    }
+    catch { $lastError = $_.Exception.Message }
+
+    # -AllUsers scheitert auf manchen Builds. Dann das Paket fuer jeden Benutzer einzeln
+    # entfernen, bei dem es registriert ist - sonst bleibt es in anderen Profilen zurueck.
+    $userSids = @(
+        $Package.PackageUserInformation |
+            ForEach-Object { [string]$_.UserSecurityId.Sid } |
+            Where-Object { $_ -match '^S-1-' } |
+            Sort-Object -Unique
+    )
+    foreach ($sid in $userSids) {
+        try { Remove-AppxPackage -Package $fullName -User $sid -ErrorAction Stop }
+        catch { $lastError = $_.Exception.Message }
+    }
+    try { Remove-AppxPackage -Package $fullName -ErrorAction Stop } catch { }
+
+    $stillInstalled = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { $_.PackageFullName -eq $fullName }).Count -gt 0
+    if ($stillInstalled) { return $lastError }
+    return $null
+}
+
+function Invoke-HPUninstallProcess {
+    # Startet einen Deinstallationsprozess versteckt und liefert den Exitcode.
+    # 1618 = ein anderer Windows-Installer-Vorgang laeuft noch -> warten und wiederholen.
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter(Mandatory)][string]$Arguments,
+        [int]$TimeoutMinutes = 15
+    )
+
+    $exitCode = 1618
+    for ($attempt = 1; $attempt -le 6 -and $exitCode -eq 1618; $attempt++) {
+        if ($attempt -gt 1) { Start-Sleep -Seconds 20 }
+        $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru -WindowStyle Hidden -ErrorAction Stop
+        $null = $process.Handle # noetig, damit ExitCode ohne -Wait verfuegbar ist
+        if (-not $process.WaitForExit($TimeoutMinutes * 60 * 1000)) {
+            # Haengt meist an einem unsichtbaren Dialog; samt Kindprozessen beenden.
+            & taskkill.exe /PID $process.Id /T /F 2>&1 | Out-Null
+            throw "Zeitueberschreitung nach $TimeoutMinutes Minuten."
+        }
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
+    }
+    return $exitCode
+}
+
+function Invoke-HPCommandLine {
+    param([Parameter(Mandatory)][string]$Command)
+
+    # cmd /s entfernt genau das aeussere Anfuehrungszeichenpaar. Ohne diese Klammerung
+    # zerbrechen Pfade mit Leerzeichen ("C:\Program Files\...").
+    Invoke-HPUninstallProcess -FilePath "$env:SystemRoot\System32\cmd.exe" -Arguments ('/d /s /c "' + $Command + '"')
+}
+
 function Invoke-HPProgramUninstall {
     param([Parameter(Mandatory)]$Program)
 
-    $name = $Program.DisplayName
-    $command = $Program.QuietUninstallString
-    $productCode = if ($Program.PSChildName -match '^\{[0-9A-Fa-f-]{36}\}$') { $Program.PSChildName } else { $null }
+    $name = [string]$Program.DisplayName
+    $successCodes = @(0, 1605, 1614, 1641, 3010)
+    $uninstallString = [string]$Program.UninstallString
+    $command = [string]$Program.QuietUninstallString
+    $hasQuietCommand = -not [string]::IsNullOrWhiteSpace($command)
+    if (-not $hasQuietCommand) { $command = $uninstallString }
 
-    if ($productCode) {
-        $filePath = 'msiexec.exe'
-        $arguments = "/x $productCode /qn /norestart"
+    $productCode = $null
+    if ("$uninstallString $command" -match '(?i)msiexec(?:\.exe)?"?\s+.*?(\{[0-9A-F-]{36}\})') {
+        $productCode = $Matches[1]
     }
-    else {
-        if ([string]::IsNullOrWhiteSpace($command)) { $command = $Program.UninstallString }
-        if ([string]::IsNullOrWhiteSpace($command)) {
-            Write-Status -Type Warning -Message "Fuer '$name' wurde kein Deinstallationsbefehl gefunden."
-            return
-        }
+    elseif ([string]$Program.PSChildName -match '^\{[0-9A-Fa-f-]{36}\}$' -and
+        ([int]$Program.WindowsInstaller -eq 1 -or [string]::IsNullOrWhiteSpace($command))) {
+        # Nur echte MSI-Produkte per ProductCode entfernen. InstallShield-Eintraege haben
+        # ebenfalls GUID-Schluessel, sind msiexec aber unbekannt (1605) und blieben sonst zurueck.
+        $productCode = [string]$Program.PSChildName
+    }
 
-        if ($command -match '(?i)msiexec(?:\.exe)?\s+.*?(\{[0-9A-F-]{36}\})') {
-            $filePath = 'msiexec.exe'
-            $arguments = "/x $($Matches[1]) /qn /norestart"
-        }
-        else {
-            $filePath = "$env:SystemRoot\System32\cmd.exe"
-            if ($command -notmatch '(?i)(/quiet|/qn|/silent|/verysilent|/s(?:\s|$))') {
-                $command += ' /quiet /norestart'
-            }
-            $arguments = @('/d', '/s', '/c', $command)
-        }
+    if (-not $productCode -and [string]::IsNullOrWhiteSpace($command)) {
+        Write-Status -Type Warning -Message "Fuer '$name' wurde kein Deinstallationsbefehl gefunden."
+        return
     }
 
     Write-Host "  Deinstalliere Desktop-Programm: $name"
     try {
-        $process = Start-Process -FilePath $filePath -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
-        if ($process.ExitCode -notin @(0, 1605, 1614, 1641, 3010)) {
-            Write-Status -Type Warning -Message "Deinstallation von '$name' endete mit Exitcode $($process.ExitCode)."
+        if ($productCode) {
+            $exitCode = Invoke-HPUninstallProcess -FilePath 'msiexec.exe' -Arguments "/x $productCode /qn /norestart REBOOT=ReallySuppress"
+        }
+        else {
+            if ($command -match '(?i)InstallShield Installation Information\\(\{[0-9A-F-]{36}\})\\setup\.exe' -and $command -notmatch '(?i)\s-f1') {
+                # InstallShield (z. B. HP Connection Optimizer) braucht fuer eine stille
+                # Deinstallation eine Antwortdatei, sonst wartet ein unsichtbarer Dialog.
+                $guid = $Matches[1]
+                $responseFile = Join-Path $env:TEMP "BloatRemover_$($guid.Trim('{}')).iss"
+                @(
+                    '[InstallShield Silent]'
+                    'Version=v7.00'
+                    'File=Response File'
+                    '[File Transfer]'
+                    'OverwrittenReadOnly=NoToAll'
+                    "[$guid-DlgOrder]"
+                    "Dlg0=$guid-MessageBox-0"
+                    'Count=2'
+                    "Dlg1=$guid-SdFinish-0"
+                    "[$guid-MessageBox-0]"
+                    'Result=6'
+                    '[Application]'
+                    "Name=$name"
+                    "Version=$([string]$Program.DisplayVersion)"
+                    'Company=HP'
+                    'Lang=0409'
+                    "[$guid-SdFinish-0]"
+                    'Result=1'
+                    'bOpt1=0'
+                    'bOpt2=0'
+                ) | Set-Content -LiteralPath $responseFile -Encoding ASCII
+                if ($command -notmatch '(?i)\s-removeonly') { $command += ' -removeonly' }
+                $command += ' -s -f1"' + $responseFile + '"'
+            }
+            elseif (-not $hasQuietCommand -and $command -notmatch '(?i)(/quiet|/qn|/silent|/verysilent|/s(?:\s|$)|--silent|-silent)') {
+                if ($command -match '(?i)\\unins\d*\.exe(?:"|\s|$)') {
+                    $command += ' /VERYSILENT /SUPPRESSMSGBOXES /NORESTART'
+                }
+                elseif ($command -match '(?i)\\(uninst|uninstall|uninstaller)\.exe(?:"|\s|$)') {
+                    $command += ' /S'
+                }
+                elseif ($command -notmatch '(?i)\.(cmd|bat)(?:"|\s|$)') {
+                    $command += ' /quiet /norestart'
+                }
+            }
+            $exitCode = Invoke-HPCommandLine -Command $command
+        }
+
+        if ($exitCode -notin $successCodes) {
+            Write-Status -Type Warning -Message "Deinstallation von '$name' endete mit Exitcode $exitCode."
         }
     }
     catch {
@@ -2858,10 +2995,9 @@ function Remove-HPDocumentation {
 
     Write-Host "  Entferne HP Documentation"
     try {
-        $command = '"' + $uninstaller + '"'
-        $process = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList @('/d', '/s', '/c', $command) -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
-        if ($process.ExitCode -ne 0) {
-            Write-Status -Type Warning -Message "HP Documentation endete mit Exitcode $($process.ExitCode)."
+        $exitCode = Invoke-HPCommandLine -Command ('"' + $uninstaller + '"')
+        if ($exitCode -ne 0) {
+            Write-Status -Type Warning -Message "HP Documentation endete mit Exitcode $exitCode."
         }
     }
     catch {
